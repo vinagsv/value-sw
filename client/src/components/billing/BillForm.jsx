@@ -1,4 +1,4 @@
-import React, { useState, useEffect, forwardRef, useImperativeHandle, useRef } from 'react';
+import React, { useState, useEffect, forwardRef, useImperativeHandle, useRef, useCallback } from 'react';
 import { createPortal } from 'react-dom';
 import { Plus, Trash2, Save, FilePlus2 } from 'lucide-react';
 import { calculateTaxes } from '../../utils/taxCalc';
@@ -6,121 +6,160 @@ import { calculateFromTotal } from '../../utils/twoWayTotal';
 import { createBill, updateBill } from '../../api/bills';
 import { fetchNextBillNumber } from '../../api/settings';
 
-// Standard 0.5-up rounding to 2 decimal places
 const r2 = (num) => Math.round((num + Number.EPSILON) * 100) / 100;
 
-const SearchableSelect = ({ value, onChange, options, isDark, placeholder }) => {
+// ── Inline item search cell ───────────────────────────────────────────────────
+const InlineItemSearch = ({ value, onChange, options, isDark, autoFocus }) => {
+  const selectedOption = options.find(o => String(o.id) === String(value));
+
+  const [query, setQuery] = useState('');
   const [isOpen, setIsOpen] = useState(false);
-  const [search, setSearch] = useState('');
-  const wrapperRef = useRef(null);
-  const dropdownRef = useRef(null);
-  const [coords, setCoords] = useState({ top: 0, left: 0, width: 0 });
+  const [highlighted, setHighlighted] = useState(0);
+  const [rect, setRect] = useState(null);
+
+  const inputRef = useRef(null);
+  const listRef  = useRef(null);
+
+  const reposition = useCallback(() => {
+    if (inputRef.current) setRect(inputRef.current.getBoundingClientRect());
+  }, []);
+
+  useEffect(() => {
+    if (autoFocus && !value) {
+      inputRef.current?.focus();
+      reposition();
+      setIsOpen(true);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [autoFocus]);
+
+  useEffect(() => {
+    if (!isOpen) return;
+    window.addEventListener('scroll', reposition, { capture: true, passive: true });
+    window.addEventListener('resize', reposition, { passive: true });
+    return () => {
+      window.removeEventListener('scroll', reposition, { capture: true });
+      window.removeEventListener('resize', reposition);
+    };
+  }, [isOpen, reposition]);
+
+  useEffect(() => {
+    if (!isOpen) return;
+    const handler = (e) => {
+      if (inputRef.current && inputRef.current.contains(e.target)) return;
+      if (listRef.current  && listRef.current.contains(e.target))  return;
+      setIsOpen(false);
+    };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, [isOpen]);
+
+  const filtered = query.trim()
+    ? options.filter(o => o.item_name.toLowerCase().includes(query.toLowerCase()))
+    : options;
 
   const openDropdown = () => {
-    if (wrapperRef.current) {
-      const rect = wrapperRef.current.getBoundingClientRect();
-      setCoords({
-        top: rect.bottom + window.scrollY + 2,
-        left: rect.left + window.scrollX,
-        width: rect.width
-      });
-    }
+    reposition();
     setIsOpen(true);
-    setSearch('');
+    setHighlighted(0);
+  };
+
+  const handleSelect = (item) => {
+    onChange(item.id);
+    setQuery('');
+    setIsOpen(false);
+  };
+
+  const handleClear = () => {
+    onChange('');
+    setQuery('');
+    setTimeout(() => { inputRef.current?.focus(); openDropdown(); }, 0);
+  };
+
+  const handleKeyDown = (e) => {
+    if (!isOpen) {
+      if (e.key === 'ArrowDown' || e.key === 'Enter') { e.preventDefault(); openDropdown(); }
+      return;
+    }
+    if (e.key === 'ArrowDown')  { e.preventDefault(); setHighlighted(h => Math.min(h + 1, filtered.length - 1)); }
+    else if (e.key === 'ArrowUp')   { e.preventDefault(); setHighlighted(h => Math.max(h - 1, 0)); }
+    else if (e.key === 'Enter')     { e.preventDefault(); if (filtered[highlighted]) handleSelect(filtered[highlighted]); }
+    else if (e.key === 'Escape')    { setIsOpen(false); }
   };
 
   useEffect(() => {
-    const handleClickOutside = (event) => {
-      if (
-        wrapperRef.current && !wrapperRef.current.contains(event.target) &&
-        (!dropdownRef.current || !dropdownRef.current.contains(event.target))
-      ) {
-        setIsOpen(false);
-      }
-    };
+    if (listRef.current && isOpen) {
+      listRef.current.children[highlighted]?.scrollIntoView({ block: 'nearest' });
+    }
+  }, [highlighted, isOpen]);
 
-    const handleScrollOrResize = (e) => {
-      if (!isOpen) return;
-      if (dropdownRef.current && dropdownRef.current.contains(e.target)) return;
-      setIsOpen(false);
-    };
+  const dropdownStyle = rect
+    ? { position: 'fixed', top: rect.bottom + 2, left: rect.left, width: Math.max(rect.width, 260), zIndex: 99999 }
+    : { display: 'none' };
 
-    const handleResize = () => {
-      if (isOpen) setIsOpen(false);
-    };
-
-    document.addEventListener('mousedown', handleClickOutside);
-    window.addEventListener('wheel', handleScrollOrResize, { capture: true, passive: true });
-    window.addEventListener('touchmove', handleScrollOrResize, { capture: true, passive: true });
-    window.addEventListener('resize', handleResize);
-
-    return () => {
-      document.removeEventListener('mousedown', handleClickOutside);
-      window.removeEventListener('wheel', handleScrollOrResize, { capture: true });
-      window.removeEventListener('touchmove', handleScrollOrResize, { capture: true });
-      window.removeEventListener('resize', handleResize);
-    };
-  }, [isOpen]);
-
-  const selectedOption = options.find(o => String(o.id) === String(value));
-  const displayValue = selectedOption ? selectedOption.item_name : '';
-  const filteredOptions = options.filter(o => o.item_name.toLowerCase().includes(search.toLowerCase()));
+  if (selectedOption) {
+    return (
+      <div className="flex items-center gap-1 w-full">
+        <button type="button" onClick={handleClear} title="Click to change item"
+          className={`flex-1 text-left px-2 py-1.5 rounded-md text-xs font-medium border truncate transition-colors
+            ${isDark ? 'bg-gray-700 border-gray-600 text-gray-100 hover:border-blue-500' : 'bg-white border-gray-200 text-gray-800 hover:border-blue-400'}`}>
+          {selectedOption.item_name}
+        </button>
+        <button type="button" onClick={handleClear} title="Change item"
+          className={`shrink-0 w-6 h-6 flex items-center justify-center rounded text-sm font-bold leading-none transition
+            ${isDark ? 'text-gray-500 hover:text-red-400' : 'text-gray-400 hover:text-red-500'}`}>
+          ×
+        </button>
+      </div>
+    );
+  }
 
   return (
-    <div ref={wrapperRef} className="relative w-full min-w-[200px]">
-      <div
-        onClick={() => isOpen ? setIsOpen(false) : openDropdown()}
-        className={`w-full cursor-pointer rounded-md px-2 py-1.5 text-xs text-left flex justify-between items-center border transition-colors ${isDark ? 'bg-gray-700 border-gray-600 text-gray-100 hover:border-blue-500' : 'bg-white border-gray-200 text-gray-800 hover:border-blue-500'}`}
-      >
-        <span className="truncate pr-2">{displayValue || placeholder}</span>
-        <span className="opacity-50 text-[10px]">▼</span>
-      </div>
-
+    <>
+      <input
+        ref={inputRef}
+        type="text"
+        value={query}
+        onChange={e => { setQuery(e.target.value); setHighlighted(0); if (!isOpen) openDropdown(); }}
+        onFocus={openDropdown}
+        onKeyDown={handleKeyDown}
+        placeholder="Type to search…"
+        className={`w-full min-w-[200px] rounded-md px-2 py-1.5 text-xs border transition focus:outline-none focus:ring-1 focus:ring-emerald-500 focus:border-emerald-500
+          ${isDark ? 'bg-gray-700 border-gray-600 text-gray-100 placeholder-gray-500' : 'bg-white border-gray-300 text-gray-800 placeholder-gray-400'}`}
+      />
       {isOpen && createPortal(
-        <div
-          ref={dropdownRef}
-          style={{ position: 'absolute', top: coords.top, left: coords.left, width: coords.width }}
-          className={`z-[99999] rounded-md shadow-2xl border overflow-hidden ${isDark ? 'bg-gray-800 border-gray-600' : 'bg-white border-gray-200'}`}
-        >
-          <div className={`p-1.5 border-b ${isDark ? 'border-gray-700 bg-gray-900' : 'border-gray-200 bg-gray-50'}`}>
-            <input
-              type="text"
-              autoFocus
-              placeholder="Search items..."
-              value={search}
-              onChange={(e) => setSearch(e.target.value)}
-              className={`w-full px-2 py-1.5 text-xs rounded border focus:outline-none focus:ring-1 focus:ring-blue-500 ${isDark ? 'bg-gray-800 border-gray-600 text-white' : 'bg-white border-gray-300 text-black'}`}
-            />
-          </div>
-          <ul
-            className="max-h-56 overflow-y-auto custom-scrollbar"
-            onWheel={(e) => e.stopPropagation()}
-          >
-            <li
-              onClick={() => { onChange(''); setIsOpen(false); }}
-              className={`px-3 py-2 text-xs cursor-pointer border-b ${isDark ? 'hover:bg-gray-700 text-gray-400 border-gray-700' : 'hover:bg-gray-100 text-gray-500 border-gray-100'}`}
-            >
-              — clear selection —
-            </li>
-            {filteredOptions.map(opt => (
-              <li
-                key={opt.id}
-                onClick={() => { onChange(opt.id); setIsOpen(false); }}
-                className={`px-3 py-2 text-xs cursor-pointer truncate border-b last:border-0 ${isDark ? 'hover:bg-gray-700 text-gray-200 border-gray-700' : 'hover:bg-blue-50 text-gray-800 border-gray-100'}`}
-              >
-                {opt.item_name}
-              </li>
-            ))}
-            {filteredOptions.length === 0 && (
-              <li className={`px-3 py-2 text-xs text-center ${isDark ? 'text-gray-500' : 'text-gray-400'}`}>
-                No matches found
-              </li>
-            )}
-          </ul>
-        </div>,
+        <>
+          {filtered.length > 0 && (
+            <ul ref={listRef} style={dropdownStyle}
+              className={`max-h-60 overflow-y-auto rounded-xl shadow-2xl border custom-scrollbar
+                ${isDark ? 'bg-gray-800 border-gray-600' : 'bg-white border-gray-200'}`}>
+              {filtered.map((item, idx) => (
+                <li key={item.id}
+                  onMouseDown={(e) => { e.preventDefault(); handleSelect(item); }}
+                  onMouseEnter={() => setHighlighted(idx)}
+                  className={`flex items-center justify-between px-3 py-2 cursor-pointer text-xs border-b last:border-0 transition-colors
+                    ${idx === highlighted
+                      ? isDark ? 'bg-emerald-900/40 text-emerald-300' : 'bg-emerald-50 text-emerald-700'
+                      : isDark ? 'border-gray-700 text-gray-200 hover:bg-gray-700' : 'border-gray-100 text-gray-800 hover:bg-gray-50'}`}>
+                  <span className="font-medium truncate pr-3">{item.item_name}</span>
+                  <span className={`tabular-nums shrink-0 ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>
+                    ₹{Number(item.rate).toFixed(2)}
+                  </span>
+                </li>
+              ))}
+            </ul>
+          )}
+          {filtered.length === 0 && query.trim() && (
+            <div style={dropdownStyle}
+              className={`px-3 py-3 text-xs text-center rounded-xl shadow-2xl border
+                ${isDark ? 'bg-gray-800 border-gray-600 text-gray-500' : 'bg-white border-gray-200 text-gray-400'}`}>
+              No items match "{query}"
+            </div>
+          )}
+        </>,
         document.body
       )}
-    </div>
+    </>
   );
 };
 
@@ -130,17 +169,19 @@ const makeInitialForm = () => ({
   job_card_no: '', vehicle_reg_no: '', narration: '', discount_percent: 0, line_items: [], external_bills: [],
 });
 
-// FIX: inventoryItems now received as a prop (cached in BillingPage) instead of
-// being fetched on every mount — eliminates the repeated network call.
 const BillForm = forwardRef(({ currentBill, onSaveSuccess, includeGatePass, setIncludeGatePass, theme, inventoryItems = [] }, ref) => {
   const isDark = theme === 'dark';
 
   const [formData, setFormData] = useState(makeInitialForm);
   const [totals, setTotals] = useState({ subtotal: 0, total_tax: 0, discount_amount: 0, grand_total: 0 });
+  const [latestRowIndex, setLatestRowIndex] = useState(null);
+
+  // Keep the current bill number so reset can preserve it
+  const currentBillNoRef = useRef('');
 
   useEffect(() => {
     if (currentBill) {
-      setFormData({
+      const fd = {
         id: currentBill.id,
         bill_no: currentBill.bill_no || '',
         date: currentBill.date ? new Date(currentBill.date).toISOString().split('T')[0] : new Date().toISOString().split('T')[0],
@@ -155,11 +196,15 @@ const BillForm = forwardRef(({ currentBill, onSaveSuccess, includeGatePass, setI
         discount_percent: currentBill.discount_percent || 0,
         line_items: currentBill.line_items || [],
         external_bills: currentBill.external_bills || [],
-      });
+      };
+      currentBillNoRef.current = fd.bill_no;
+      setFormData(fd);
+      setLatestRowIndex(null);
     } else {
       const loadNextBillNo = async () => {
         try {
           const res = await fetchNextBillNumber();
+          currentBillNoRef.current = res.next_bill_no;
           setFormData({ ...makeInitialForm(), bill_no: res.next_bill_no });
         } catch (err) { console.error('Failed to fetch next bill no', err); }
       };
@@ -167,32 +212,19 @@ const BillForm = forwardRef(({ currentBill, onSaveSuccess, includeGatePass, setI
     }
   }, [currentBill]);
 
-  // Totals calculation with proper rounding
   useEffect(() => {
     let sub = 0, tax = 0, extTotal = 0;
-
     formData.line_items.forEach(item => {
       sub += Number(item.taxable_value) || 0;
-      tax += (Number(item.cgst_amt) || 0)
-           + (Number(item.sgst_amt) || 0)
-           + (Number(item.igst_amt) || 0);
+      tax += (Number(item.cgst_amt) || 0) + (Number(item.sgst_amt) || 0) + (Number(item.igst_amt) || 0);
     });
+    formData.external_bills.forEach(ext => { extTotal += Number(ext.amount) || 0; });
 
-    formData.external_bills.forEach(ext => {
-      extTotal += Number(ext.amount) || 0;
-    });
-
-    sub      = r2(sub);
-    tax      = r2(tax);
-    extTotal = r2(extTotal);
-
+    sub = r2(sub); tax = r2(tax); extTotal = r2(extTotal);
     const internalPreDiscount = r2(sub + tax);
-    const discountAmt         = r2(internalPreDiscount * (Number(formData.discount_percent) || 0) / 100);
-    const internalTotal       = r2(internalPreDiscount - discountAmt);
-    const rawGrand            = r2(internalTotal + extTotal);
-
-    // Round grand total to nearest whole rupee
-    const grandRounded = Math.round(rawGrand);
+    const discountAmt = r2(internalPreDiscount * (Number(formData.discount_percent) || 0) / 100);
+    const internalTotal = r2(internalPreDiscount - discountAmt);
+    const grandRounded = Math.round(r2(internalTotal + extTotal));
 
     setTotals({
       subtotal:        sub.toFixed(2),
@@ -204,33 +236,27 @@ const BillForm = forwardRef(({ currentBill, onSaveSuccess, includeGatePass, setI
 
   const handleChange = (e) => {
     const { name, value, type, checked } = e.target;
-
-    // FIX: coerce discount_percent — never let it become an empty string in state,
-    // which would be sent to the API and cause a Postgres NUMERIC cast error.
     let val;
-    if (type === 'checkbox') {
-      val = checked;
-    } else if (name === 'discount_percent') {
-      val = value === '' ? 0 : Number(value);
-    } else {
-      val = value;
-    }
+    if (type === 'checkbox') val = checked;
+    else if (name === 'discount_percent') val = value === '' ? 0 : Number(value);
+    else val = value;
 
     setFormData(prev => {
       const next = { ...prev, [name]: val };
-      if (name === 'is_gst_customer' && !val) {
-        next.customer_gstin = '';
-        next.is_interstate = false;
-      }
+      if (name === 'is_gst_customer' && !val) { next.customer_gstin = ''; next.is_interstate = false; }
       return next;
     });
   };
 
   const addLineItem = () => {
-    setFormData(prev => ({
-      ...prev,
-      line_items: [...prev.line_items, { item_id: '', name: '', hsn_code: '', qty: 1, custom_rate: 0, tax_rate: 18, taxable_value: 0, cgst_amt: 0, sgst_amt: 0, igst_amt: 0, line_total: 0 }],
-    }));
+    setFormData(prev => {
+      const newItems = [
+        ...prev.line_items,
+        { item_id: '', name: '', hsn_code: '', qty: 1, custom_rate: 0, tax_rate: 18, taxable_value: 0, cgst_amt: 0, sgst_amt: 0, igst_amt: 0, line_total: 0 },
+      ];
+      setLatestRowIndex(newItems.length - 1);
+      return { ...prev, line_items: newItems };
+    });
   };
 
   const handleItemSelection = (index, dbItemId) => {
@@ -239,8 +265,7 @@ const BillForm = forwardRef(({ currentBill, onSaveSuccess, includeGatePass, setI
     const item = newItems[index];
 
     if (!selectedDbItem) {
-      item.item_id = '';
-      item.name = '';
+      item.item_id = ''; item.name = '';
       setFormData(prev => ({ ...prev, line_items: newItems }));
       return;
     }
@@ -252,14 +277,13 @@ const BillForm = forwardRef(({ currentBill, onSaveSuccess, includeGatePass, setI
     item.custom_rate = selectedDbItem.rate;
     item.qty = 1;
 
-    const taxable = r2((Number(item.qty) || 0) * (Number(item.custom_rate) || 0));
+    const taxable = r2(1 * (Number(selectedDbItem.rate) || 0));
     item.taxable_value = taxable;
     const taxes = calculateTaxes(taxable, item.tax_rate, formData.is_interstate);
-    item.cgst_amt = taxes.cgst_amt;
-    item.sgst_amt = taxes.sgst_amt;
-    item.igst_amt = taxes.igst_amt;
+    item.cgst_amt = taxes.cgst_amt; item.sgst_amt = taxes.sgst_amt; item.igst_amt = taxes.igst_amt;
     item.line_total = r2(taxable + taxes.total_tax).toFixed(2);
 
+    setLatestRowIndex(null);
     setFormData(prev => ({ ...prev, line_items: newItems }));
   };
 
@@ -271,18 +295,13 @@ const BillForm = forwardRef(({ currentBill, onSaveSuccess, includeGatePass, setI
       const taxable = r2((Number(item.qty) || 0) * (Number(item.custom_rate) || 0));
       item.taxable_value = taxable;
       const taxes = calculateTaxes(taxable, item.tax_rate, formData.is_interstate);
-      item.cgst_amt = taxes.cgst_amt;
-      item.sgst_amt = taxes.sgst_amt;
-      item.igst_amt = taxes.igst_amt;
+      item.cgst_amt = taxes.cgst_amt; item.sgst_amt = taxes.sgst_amt; item.igst_amt = taxes.igst_amt;
       item.line_total = r2(taxable + taxes.total_tax).toFixed(2);
     } else if (field === 'line_total') {
-      const total = Number(value) || 0;
-      const taxable = calculateFromTotal(total, item.tax_rate);
+      const taxable = calculateFromTotal(Number(value) || 0, item.tax_rate);
       item.taxable_value = taxable;
       const taxes = calculateTaxes(taxable, item.tax_rate, formData.is_interstate);
-      item.cgst_amt = taxes.cgst_amt;
-      item.sgst_amt = taxes.sgst_amt;
-      item.igst_amt = taxes.igst_amt;
+      item.cgst_amt = taxes.cgst_amt; item.sgst_amt = taxes.sgst_amt; item.igst_amt = taxes.igst_amt;
       if (item.qty > 0) item.custom_rate = r2(taxable / item.qty).toFixed(2);
     }
 
@@ -291,6 +310,7 @@ const BillForm = forwardRef(({ currentBill, onSaveSuccess, includeGatePass, setI
   };
 
   const removeLineItem = (index) => {
+    setLatestRowIndex(null);
     setFormData(prev => ({ ...prev, line_items: prev.line_items.filter((_, i) => i !== index) }));
   };
 
@@ -301,7 +321,7 @@ const BillForm = forwardRef(({ currentBill, onSaveSuccess, includeGatePass, setI
   const updateExternalBill = (index, field, value) => {
     const newExts = [...formData.external_bills];
     newExts[index][field] = value;
-    if (field === 'name') newExts[index].type_id = value === 'CSI Bill' ? 1 : value === 'BC Bill' ? 2 : 1;
+    if (field === 'name') newExts[index].type_id = value === 'CSI Bill' ? 1 : 2;
     setFormData(prev => ({ ...prev, external_bills: newExts }));
   };
 
@@ -311,25 +331,17 @@ const BillForm = forwardRef(({ currentBill, onSaveSuccess, includeGatePass, setI
 
   const buildPayload = (fd, tot) => ({
     ...fd,
-    subtotal: tot.subtotal,
-    total_tax: tot.total_tax,
-    discount_amount: tot.discount_amount,
-    grand_total: tot.grand_total,
+    subtotal: tot.subtotal, total_tax: tot.total_tax,
+    discount_amount: tot.discount_amount, grand_total: tot.grand_total,
     include_gate_pass: includeGatePass,
   });
 
-  // FIX: Single shared async save function — both the ref-exposed triggerSave
-  // and the inline Save button call this. Previously duplicated, which meant
-  // any patch to one path silently left the other stale.
   const executeSave = async () => {
     if (formData.line_items.length === 0) throw new Error('NO_ITEMS');
     const payload = buildPayload(formData, totals);
     let savedData;
-    if (formData.id) {
-      savedData = await updateBill(formData.id, payload);
-    } else {
-      savedData = await createBill(payload);
-    }
+    if (formData.id) savedData = await updateBill(formData.id, payload);
+    else savedData = await createBill(payload);
     const finalBillState = {
       ...payload,
       id: savedData.billId || formData.id,
@@ -340,9 +352,19 @@ const BillForm = forwardRef(({ currentBill, onSaveSuccess, includeGatePass, setI
     return finalBillState;
   };
 
+  // Exposed to parent via ref
   useImperativeHandle(ref, () => ({
     triggerSave: executeSave,
     getFormData: () => buildPayload(formData, totals),
+    // Reset all fields but keep the current bill number
+    resetForm: () => {
+      setLatestRowIndex(null);
+      setFormData({
+        ...makeInitialForm(),
+        bill_no: currentBillNoRef.current,
+        date: new Date().toISOString().split('T')[0],
+      });
+    },
   }));
 
   const handleSave = async () => {
@@ -350,23 +372,19 @@ const BillForm = forwardRef(({ currentBill, onSaveSuccess, includeGatePass, setI
       alert('Cannot save to database without internal items. Switch to "Preview" to print a Draft or Gate Pass only.');
       return;
     }
-    try {
-      await executeSave();
-    } catch (error) {
-      console.error('Failed to save bill', error);
-      alert('Failed to save invoice.');
-    }
+    try { await executeSave(); }
+    catch (error) { console.error('Failed to save bill', error); alert('Failed to save invoice.'); }
   };
 
-  /* Shared style tokens */
-  const card = isDark ? 'bg-gray-800 border border-gray-700 rounded-xl' : 'bg-white border border-gray-200 rounded-xl';
+  /* Style tokens */
+  const card        = isDark ? 'bg-gray-800 border border-gray-700 rounded-xl' : 'bg-white border border-gray-200 rounded-xl';
   const sectionLabel = 'text-xs font-semibold uppercase tracking-widest text-gray-400';
-  const divider = isDark ? 'border-gray-700' : 'border-gray-100';
-  const fieldLabel = isDark ? 'block text-xs font-medium text-gray-400 mb-1' : 'block text-xs font-medium text-gray-500 mb-1';
-  const input = isDark
+  const divider     = isDark ? 'border-gray-700' : 'border-gray-100';
+  const fieldLabel  = isDark ? 'block text-xs font-medium text-gray-400 mb-1' : 'block text-xs font-medium text-gray-500 mb-1';
+  const input       = isDark
     ? 'w-full bg-gray-700 border border-gray-600 text-gray-100 placeholder-gray-500 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition'
     : 'w-full bg-gray-50 border border-gray-300 text-gray-800 placeholder-gray-400 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition';
-  const tableInput = isDark
+  const tableInput  = isDark
     ? 'w-full min-w-[80px] bg-gray-700 border border-gray-600 text-gray-100 rounded-md px-2 py-1.5 text-xs focus:outline-none focus:ring-1 focus:ring-blue-500 focus:border-transparent'
     : 'w-full min-w-[80px] bg-white border border-gray-200 text-gray-800 rounded-md px-2 py-1.5 text-xs focus:outline-none focus:ring-1 focus:ring-blue-500 focus:border-transparent';
   const accentInput = isDark
@@ -375,14 +393,13 @@ const BillForm = forwardRef(({ currentBill, onSaveSuccess, includeGatePass, setI
   const accentGreenInput = isDark
     ? 'w-full min-w-[80px] bg-emerald-900/30 border border-emerald-700 text-emerald-300 rounded-md px-2 py-1.5 text-xs font-bold focus:outline-none focus:ring-1 focus:ring-emerald-400 focus:border-transparent'
     : 'w-full min-w-[80px] bg-emerald-50 border border-emerald-200 text-emerald-700 rounded-md px-2 py-1.5 text-xs font-bold focus:outline-none focus:ring-1 focus:ring-emerald-400 focus:border-transparent';
-  const thClass = isDark
+  const thClass     = isDark
     ? 'px-3 py-2.5 text-left text-xs font-semibold uppercase tracking-wider text-gray-400 bg-gray-750 border-b border-gray-700'
     : 'px-3 py-2.5 text-left text-xs font-semibold uppercase tracking-wider text-gray-400 bg-gray-50 border-b border-gray-200';
-  const trClass = (idx) => isDark
+  const trClass     = (idx) => isDark
     ? `border-b border-gray-700 ${idx % 2 === 0 ? 'bg-gray-800' : 'bg-gray-800/60'} hover:bg-gray-700/50 transition-colors`
     : `border-b border-gray-100 ${idx % 2 === 0 ? 'bg-white' : 'bg-gray-50/50'} hover:bg-blue-50/30 transition-colors`;
 
-  // Internal subtotal display: sum of line items after discount, before external bills
   const internalTotal = r2(Number(totals.subtotal) + Number(totals.total_tax) - Number(totals.discount_amount)).toFixed(2);
 
   return (
@@ -393,11 +410,8 @@ const BillForm = forwardRef(({ currentBill, onSaveSuccess, includeGatePass, setI
         <div className={`px-5 py-3 border-b ${divider} flex flex-wrap justify-between items-center gap-3`}>
           <div className="flex items-center gap-3">
             <div className="w-1 h-4 rounded-full bg-blue-500" />
-            <span className={sectionLabel}>
-              {formData.id ? 'Edit Bill Details' : 'New Bill'}
-            </span>
+            <span className={sectionLabel}>{formData.id ? 'Edit Bill Details' : 'New Bill'}</span>
           </div>
-
           <div className="flex flex-wrap gap-2">
             <label className={`inline-flex items-center gap-2 px-3 py-1 rounded-full border cursor-pointer w-max transition-colors
               ${includeGatePass
@@ -406,7 +420,6 @@ const BillForm = forwardRef(({ currentBill, onSaveSuccess, includeGatePass, setI
               <input type="checkbox" checked={includeGatePass} onChange={(e) => setIncludeGatePass(e.target.checked)} className="rounded accent-amber-600 w-4 h-4" />
               <span className="text-[11px] font-bold tracking-wide">AUTO-GENERATE GATE PASS</span>
             </label>
-
             <label className={`inline-flex items-center gap-2 px-3 py-1 rounded-full border cursor-pointer w-max transition-colors
               ${formData.is_gst_customer
                 ? (isDark ? 'bg-blue-900/50 border-blue-500 text-blue-300' : 'bg-blue-100 border-blue-400 text-blue-800')
@@ -416,7 +429,6 @@ const BillForm = forwardRef(({ currentBill, onSaveSuccess, includeGatePass, setI
             </label>
           </div>
         </div>
-
         <div className="p-5 grid grid-cols-2 md:grid-cols-4 gap-4">
           <div>
             <label className={fieldLabel}>Bill No</label>
@@ -457,7 +469,6 @@ const BillForm = forwardRef(({ currentBill, onSaveSuccess, includeGatePass, setI
               <input type="text" name="customer_mobile" value={formData.customer_mobile} onChange={handleChange} className={input} placeholder="Optional" />
             </div>
           </div>
-
           {formData.is_gst_customer && (
             <div className={`grid grid-cols-1 md:grid-cols-2 gap-4 p-4 rounded-xl border ${isDark ? 'bg-gray-700/30 border-gray-600' : 'bg-gray-50 border-gray-200'}`}>
               <div>
@@ -505,41 +516,36 @@ const BillForm = forwardRef(({ currentBill, onSaveSuccess, includeGatePass, setI
               {formData.line_items.map((item, index) => (
                 <tr key={index} className={trClass(index)}>
                   <td className="px-3 py-2">
-                    <SearchableSelect
+                    <InlineItemSearch
                       value={item.item_id || ''}
                       onChange={(val) => handleItemSelection(index, val)}
                       options={inventoryItems}
                       isDark={isDark}
-                      placeholder="— search item —"
+                      autoFocus={index === latestRowIndex}
                     />
                   </td>
                   <td className="px-3 py-2">
-                    <input type="text" value={item.hsn_code} onChange={(e) => updateLineItem(index, 'hsn_code', e.target.value)}
-                      className={tableInput} />
+                    <input type="text" value={item.hsn_code} onChange={(e) => updateLineItem(index, 'hsn_code', e.target.value)} className={tableInput} />
                   </td>
                   <td className="px-3 py-2">
                     <input type="number" value={item.qty === 0 ? '' : item.qty}
                       onChange={(e) => updateLineItem(index, 'qty', e.target.value)}
-                      onFocus={(e) => e.target.select()}
-                      className={tableInput} />
+                      onFocus={(e) => e.target.select()} className={tableInput} />
                   </td>
                   <td className="px-3 py-2">
                     <input type="number" value={item.custom_rate === 0 ? '' : item.custom_rate}
                       onChange={(e) => updateLineItem(index, 'custom_rate', e.target.value)}
-                      onFocus={(e) => e.target.select()}
-                      className={accentInput} />
+                      onFocus={(e) => e.target.select()} className={accentInput} />
                   </td>
                   <td className="px-3 py-2">
                     <input type="number" value={item.tax_rate === 0 ? '' : item.tax_rate}
                       onChange={(e) => updateLineItem(index, 'tax_rate', e.target.value)}
-                      onFocus={(e) => e.target.select()}
-                      className={tableInput} />
+                      onFocus={(e) => e.target.select()} className={tableInput} />
                   </td>
                   <td className="px-3 py-2">
                     <input type="number" value={item.line_total === 0 ? '' : item.line_total}
                       onChange={(e) => updateLineItem(index, 'line_total', e.target.value)}
-                      onFocus={(e) => e.target.select()}
-                      className={accentGreenInput} />
+                      onFocus={(e) => e.target.select()} className={accentGreenInput} />
                   </td>
                   <td className="px-3 py-2 text-center">
                     <button onClick={() => removeLineItem(index)}
@@ -575,14 +581,12 @@ const BillForm = forwardRef(({ currentBill, onSaveSuccess, includeGatePass, setI
           )}
           {formData.external_bills.map((ext, index) => (
             <div key={index} className={`flex gap-3 items-center p-3 rounded-lg border ${isDark ? 'bg-gray-700/40 border-gray-600' : 'bg-gray-50 border-gray-200'}`}>
-              <select value={ext.name} onChange={(e) => updateExternalBill(index, 'name', e.target.value)}
-                className={`${input} max-w-[140px]`}>
+              <select value={ext.name} onChange={(e) => updateExternalBill(index, 'name', e.target.value)} className={`${input} max-w-[140px]`}>
                 <option value="BC Bill">BC Bill</option>
                 <option value="CSI Bill">CSI Bill</option>
               </select>
               <input type="text" placeholder="Reference number" value={ext.ref_number}
-                onChange={(e) => updateExternalBill(index, 'ref_number', e.target.value)}
-                className={`${input} flex-1`} />
+                onChange={(e) => updateExternalBill(index, 'ref_number', e.target.value)} className={`${input} flex-1`} />
               <input type="number" placeholder="Amount" value={ext.amount === 0 ? '' : ext.amount}
                 onChange={(e) => updateExternalBill(index, 'amount', e.target.value)}
                 onFocus={(e) => e.target.select()}
@@ -608,7 +612,6 @@ const BillForm = forwardRef(({ currentBill, onSaveSuccess, includeGatePass, setI
       {/* Footer: Narration + Summary */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
 
-        {/* Narration */}
         <div className={`${card} overflow-hidden`}>
           <div className={`px-5 py-3 border-b ${divider} flex items-center gap-3`}>
             <div className="w-1 h-4 rounded-full bg-amber-500" />
@@ -618,24 +621,18 @@ const BillForm = forwardRef(({ currentBill, onSaveSuccess, includeGatePass, setI
             <div>
               <label className={fieldLabel}>Remarks / Narration</label>
               <textarea name="narration" value={formData.narration} onChange={handleChange} rows={4}
-                className={`${input} resize-none`}
-                placeholder="Add specific bill details here..." />
+                className={`${input} resize-none`} placeholder="Add specific bill details here..." />
             </div>
             <div>
               <label className={fieldLabel}>Discount on Total (%)</label>
-              <input
-                type="number"
-                name="discount_percent"
+              <input type="number" name="discount_percent"
                 value={formData.discount_percent === 0 ? '' : formData.discount_percent}
-                onChange={handleChange}
-                onFocus={(e) => e.target.select()}
-                className={`${input} max-w-[120px]`}
-              />
+                onChange={handleChange} onFocus={(e) => e.target.select()}
+                className={`${input} max-w-[120px]`} />
             </div>
           </div>
         </div>
 
-        {/* Summary */}
         <div className={`${card} overflow-hidden flex flex-col`}>
           <div className={`px-5 py-3 border-b ${divider} flex items-center gap-3`}>
             <div className="w-1 h-4 rounded-full bg-blue-500" />
@@ -644,12 +641,10 @@ const BillForm = forwardRef(({ currentBill, onSaveSuccess, includeGatePass, setI
           <div className="p-5 flex-1">
             <div className="space-y-2.5 text-sm">
               <div className={`flex justify-between ${isDark ? 'text-gray-300' : 'text-gray-600'}`}>
-                <span>Taxable Total</span>
-                <span className="font-medium tabular-nums">₹{totals.subtotal}</span>
+                <span>Taxable Total</span><span className="font-medium tabular-nums">₹{totals.subtotal}</span>
               </div>
               <div className={`flex justify-between ${isDark ? 'text-gray-300' : 'text-gray-600'}`}>
-                <span>Total GST</span>
-                <span className="font-medium tabular-nums">₹{totals.total_tax}</span>
+                <span>Total GST</span><span className="font-medium tabular-nums">₹{totals.total_tax}</span>
               </div>
               {Number(totals.discount_amount) > 0 && (
                 <div className={`flex justify-between font-semibold ${isDark ? 'text-red-400' : 'text-red-500'}`}>
@@ -657,26 +652,18 @@ const BillForm = forwardRef(({ currentBill, onSaveSuccess, includeGatePass, setI
                   <span className="tabular-nums">− ₹{totals.discount_amount}</span>
                 </div>
               )}
-
               <div className={`mt-2 pt-2 border-t ${divider} flex justify-between font-bold ${isDark ? 'text-gray-200' : 'text-gray-800'}`}>
-                <span>TOTAL</span>
-                <span className="tabular-nums">₹{internalTotal}</span>
+                <span>TOTAL</span><span className="tabular-nums">₹{internalTotal}</span>
               </div>
-
               {formData.external_bills.map((ext, idx) => (
                 <div key={idx} className={`flex justify-between mt-2 ${isDark ? 'text-violet-400' : 'text-violet-600'}`}>
                   <span>{ext.name || 'External Bill'}</span>
                   <span className="font-medium tabular-nums">+ ₹{Number(ext.amount || 0).toFixed(2)}</span>
                 </div>
               ))}
-
               <div className={`mt-3 pt-3 border-t ${divider} flex justify-between items-center`}>
-                <span className={`text-base font-bold uppercase tracking-wide ${isDark ? 'text-gray-100' : 'text-gray-800'}`}>
-                  Grand Total
-                </span>
-                <span className={`text-2xl font-black tabular-nums ${isDark ? 'text-blue-400' : 'text-blue-600'}`}>
-                  ₹{totals.grand_total}
-                </span>
+                <span className={`text-base font-bold uppercase tracking-wide ${isDark ? 'text-gray-100' : 'text-gray-800'}`}>Grand Total</span>
+                <span className={`text-2xl font-black tabular-nums ${isDark ? 'text-blue-400' : 'text-blue-600'}`}>₹{totals.grand_total}</span>
               </div>
             </div>
           </div>

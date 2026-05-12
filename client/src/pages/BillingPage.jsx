@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { Printer, FileText, Eye, ChevronRight, ChevronLeft, Plus, Save, Ban, RefreshCcw, CheckCircle, Loader2 } from 'lucide-react';
+import { Printer, FileText, Eye, ChevronRight, ChevronLeft, Plus, Save, Ban, RefreshCcw, CheckCircle, Loader2, RotateCcw } from 'lucide-react';
 import BillForm from '../components/billing/BillForm';
 import BillPreview from '../components/billing/BillPreview';
 import PreviousBillsPanel from '../components/billing/PreviousBillsPanel';
@@ -26,12 +26,10 @@ const BillingPage = ({ theme }) => {
   // null | 'saving' | 'saved' | 'opening'
   const [printStatus, setPrintStatus] = useState(null);
 
-  // --- BUG FIX: Fetch items and pass to BillForm ---
   useEffect(() => {
     const loadInventory = async () => {
       try {
         const data = await fetchItems('');
-        // Filter so we only see active inventory items in the dropdown
         setInventoryItems(data.filter(item => item.status === 'Active'));
       } catch (err) {
         console.error('Failed to load inventory for billing', err);
@@ -64,10 +62,7 @@ const BillingPage = ({ theme }) => {
       if (includeGatePass && currentBill?.id && !currentBill?.has_gate_pass) {
         setPrintStatus('saving');
         try {
-          await updateBill(currentBill.id, {
-            ...currentBill,
-            include_gate_pass: true,
-          });
+          await updateBill(currentBill.id, { ...currentBill, include_gate_pass: true });
           setCurrentBill(prev => ({ ...prev, has_gate_pass: true }));
           setRefreshCounter(prev => prev + 1);
           setPrintStatus('saved');
@@ -152,6 +147,14 @@ const BillingPage = ({ theme }) => {
     setViewMode('form');
   };
 
+  // Reset the current form back to a blank slate, keeping the bill number intact
+  const handleReset = () => {
+    if (!billFormRef.current) return;
+    billFormRef.current.resetForm();
+    setIncludeGatePass(false);
+    showToast('Form Reset', 'success');
+  };
+
   const handleBillSelect = (bill) => {
     setCurrentBill(bill);
     setIncludeGatePass(Boolean(bill.has_gate_pass));
@@ -192,12 +195,8 @@ const BillingPage = ({ theme }) => {
         <div className={`${bg} border-2 ${ring} rounded-2xl shadow-2xl px-10 py-8 flex flex-col items-center gap-4 min-w-[280px]`}>
           {icon}
           <div className="text-center">
-            <p className={`text-base font-black tracking-wide ${isDark ? 'text-gray-100' : 'text-gray-800'}`}>
-              {heading}
-            </p>
-            <p className={`text-xs mt-1 ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>
-              {sub}
-            </p>
+            <p className={`text-base font-black tracking-wide ${isDark ? 'text-gray-100' : 'text-gray-800'}`}>{heading}</p>
+            <p className={`text-xs mt-1 ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>{sub}</p>
           </div>
         </div>
       </div>
@@ -253,8 +252,7 @@ const BillingPage = ({ theme }) => {
         {isPanelOpen && (
           <div className="w-72 h-full flex flex-col">
             <div className={`px-4 pt-4 pb-3 border-b ${isDark ? 'border-gray-700/80' : 'border-gray-100'}`}>
-              <p className={`text-[10px] font-bold uppercase tracking-[0.18em] mb-3
-                ${isDark ? 'text-gray-500' : 'text-gray-400'}`}>
+              <p className={`text-[10px] font-bold uppercase tracking-[0.18em] mb-3 ${isDark ? 'text-gray-500' : 'text-gray-400'}`}>
                 Archives
               </p>
               <button
@@ -318,6 +316,7 @@ const BillingPage = ({ theme }) => {
           </div>
 
           <div className="flex items-center gap-3">
+            {/* Cancel / Reactivate (only when a saved bill is loaded) */}
             {currentBill?.id && currentBill.status !== 'CANCELLED' && (
               <button
                 onClick={handleCancelInvoice}
@@ -340,6 +339,21 @@ const BillingPage = ({ theme }) => {
                 <RefreshCcw size={15} /> Reactivate Invoice
               </button>
             )}
+
+            {/* Reset button — only shown on the form tab for an unsaved bill */}
+            {viewMode === 'form' && !currentBill?.id && (
+              <button
+                onClick={handleReset}
+                disabled={isBusy}
+                title="Clear all entered details, keep bill number"
+                className={`flex items-center gap-2 px-3 py-1.5 rounded-lg text-sm font-bold transition border disabled:opacity-50
+                  ${isDark
+                    ? 'bg-gray-700 border-gray-600 text-gray-400 hover:bg-gray-600 hover:text-gray-200'
+                    : 'bg-gray-50 border-gray-200 text-gray-500 hover:bg-gray-100 hover:text-gray-700'}`}>
+                <RotateCcw size={15} /> Reset
+              </button>
+            )}
+
             <PrintButton />
           </div>
         </div>
