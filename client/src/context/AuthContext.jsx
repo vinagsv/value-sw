@@ -12,25 +12,22 @@ export const AuthProvider = ({ children }) => {
 
   useEffect(() => {
     const validateSession = async () => {
-      const token = localStorage.getItem('token');
+      const token    = localStorage.getItem('token');
       const username = localStorage.getItem('username');
+      const role     = localStorage.getItem('role');
 
       if (!token || !username) {
         setLoading(false);
         return;
       }
 
-      // BUG FIX: Previously only checked localStorage existence, never validated
-      // the token with the server. A stale/expired token would let the user appear
-      // logged in but every API call would 401 and redirect them.
-      // Now we probe the server on load so the UI state is always accurate.
       try {
         await apiClient.get('/settings');
-        setUser({ username, token });
-      } catch (err) {
-        // Token invalid or expired — clear it silently
+        setUser({ username, token, role: role || 'user' });
+      } catch {
         localStorage.removeItem('token');
         localStorage.removeItem('username');
+        localStorage.removeItem('role');
         setUser(null);
       } finally {
         setLoading(false);
@@ -45,12 +42,13 @@ export const AuthProvider = ({ children }) => {
       const data = await loginUser({ username, password });
       localStorage.setItem('token', data.token);
       localStorage.setItem('username', data.username);
-      setUser({ username: data.username, token: data.token });
+      localStorage.setItem('role', data.role);
+      setUser({ username: data.username, token: data.token, role: data.role, displayName: data.displayName });
       return { success: true };
     } catch (error) {
-      return { 
-        success: false, 
-        error: error.response?.data?.error || 'Login failed' 
+      return {
+        success: false,
+        error: error.response?.data?.error || 'Login failed',
       };
     }
   };
@@ -58,13 +56,17 @@ export const AuthProvider = ({ children }) => {
   const logout = () => {
     localStorage.removeItem('token');
     localStorage.removeItem('username');
+    localStorage.removeItem('role');
     setUser(null);
   };
+
+  // Convenience helpers
+  const isAdmin = user?.role === 'admin';
 
   if (loading) return null;
 
   return (
-    <AuthContext.Provider value={{ user, login, logout }}>
+    <AuthContext.Provider value={{ user, login, logout, isAdmin }}>
       {children}
     </AuthContext.Provider>
   );

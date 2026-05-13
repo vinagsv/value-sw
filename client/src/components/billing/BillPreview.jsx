@@ -93,23 +93,10 @@ const InvoiceContent = ({ currentBill }) => {
   const lineItems     = currentBill.line_items    || [];
   const externalBills = currentBill.external_bills || [];
 
-  // FIX: Sum CGST and SGST directly from line items instead of halving total_tax.
-  // The stored per-line amounts are independently rounded, so summing them is
-  // exact. Dividing the already-rounded total_tax by 2 can drift by ±0.01
-  // per item and will not match the line-level figures printed above.
   const totalCgst = lineItems.reduce((s, i) => s + (Number(i.cgst_amt) || 0), 0);
   const totalSgst = lineItems.reduce((s, i) => s + (Number(i.sgst_amt) || 0), 0);
   const totalIgst = lineItems.reduce((s, i) => s + (Number(i.igst_amt) || 0), 0);
 
-  // FIX: The totals section must reflect the correct order of operations:
-  //   1. Taxable subtotal
-  //   2. GST (CGST+SGST or IGST)
-  //   3. Discount (applied to internal items only)
-  //   4. Internal total after discount
-  //   5. External bills added on top
-  //   6. Grand total
-  // Previously external bills were added into the pre-discount subtotal, making
-  // the discount appear to be taken off an inflated base — which is wrong.
   const internalAfterDiscount =
     Number(currentBill.subtotal) +
     Number(currentBill.total_tax) -
@@ -181,15 +168,12 @@ const InvoiceContent = ({ currentBill }) => {
                 {currentBill.is_interstate ? (
                   <tr>
                     <td style={{ textAlign: 'right', padding: '3px 16px 3px 0', color: muted }}>IGST</td>
-                    {/* FIX: use summed line-item IGST, not total_tax (same value for
-                        interstate but consistent with the CGST/SGST fix below) */}
                     <td style={{ textAlign: 'right', padding: '3px 0' }}>₹{totalIgst.toFixed(2)}</td>
                   </tr>
                 ) : (
                   <>
                     <tr>
                       <td style={{ textAlign: 'right', padding: '3px 16px 3px 0', color: muted }}>CGST</td>
-                      {/* FIX: sum from line items — no longer halving the rounded total */}
                       <td style={{ textAlign: 'right', padding: '3px 0' }}>₹{totalCgst.toFixed(2)}</td>
                     </tr>
                     <tr>
@@ -206,10 +190,6 @@ const InvoiceContent = ({ currentBill }) => {
                   </tr>
                 )}
 
-                {/* FIX: Show internal total (after discount) as a subtotal row
-                    BEFORE adding external bills. Previously the discount was shown
-                    after external bills were already included, implying the discount
-                    reduced external bill amounts — which is wrong. */}
                 {externalBills.length > 0 && (
                   <tr>
                     <td style={{ textAlign: 'right', padding: '5px 16px 5px 0', fontWeight: 700, borderTop: `1px solid ${border}`, color: muted }}>Internal Total</td>
@@ -288,6 +268,38 @@ const GatePassBody = ({ currentBill }) => (
   </>
 );
 
+// FIX #4: CANCELLED watermark — rendered as a sibling ABOVE the content layer using z-index.
+// Previously it used position:absolute with zIndex:0 which placed it BEHIND content, so
+// whenever the invoice had many line items the content painted over the watermark making it
+// invisible. Now it uses zIndex:10 (same as the content wrapper) but with pointer-events:none
+// so it floats visually on top without blocking any interactions.
+const CancelledWatermark = () => (
+  <div style={{
+    position: 'absolute',
+    inset: 0,
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    zIndex: 20,           // above content (zIndex 10) so it is never hidden
+    pointerEvents: 'none',
+  }}>
+    <div style={{
+      border: '8px solid rgba(239,68,68,0.22)',
+      color: 'rgba(239,68,68,0.22)',
+      fontSize: 110,
+      fontWeight: 900,
+      transform: 'rotate(-45deg)',
+      padding: '20px 30px',
+      borderRadius: 24,
+      letterSpacing: '0.1em',
+      fontFamily: 'sans-serif',
+      userSelect: 'none',
+    }}>
+      CANCELLED
+    </div>
+  </div>
+);
+
 /* Main component */
 const BillPreview = ({ currentBill, includeGatePass }) => {
   const probeRef   = useRef(null);
@@ -298,12 +310,8 @@ const BillPreview = ({ currentBill, includeGatePass }) => {
   const BANK_FOOTER_PX = 48;
   const GP_PX          = 310;
 
-  // FIX: Debounce the scrollHeight measurement so it doesn't force a browser
-  // reflow on every keystroke while the user is editing the bill form.
-  // 150 ms delay is imperceptible to the user but eliminates continuous layout thrash.
   useEffect(() => {
     if (!includeGatePass) { setFitsOnePage(null); return; }
-
     const t = setTimeout(() => {
       if (!probeRef.current) return;
       const contentH = probeRef.current.scrollHeight;
@@ -311,7 +319,6 @@ const BillPreview = ({ currentBill, includeGatePass }) => {
       const available   = A4_PX - PADDING_PX;
       setFitsOnePage(totalNeeded <= available);
     }, 150);
-
     return () => clearTimeout(t);
   }, [currentBill, includeGatePass]);
 
@@ -325,37 +332,15 @@ const BillPreview = ({ currentBill, includeGatePass }) => {
     );
   }
 
-  const cancelledWatermark = currentBill.status === 'CANCELLED' && (
-    <div style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 0, pointerEvents: 'none' }}>
-      <div style={{ border: '8px solid rgba(239,68,68,0.18)', color: 'rgba(239,68,68,0.18)', fontSize: 110, fontWeight: 900, transform: 'rotate(-45deg)', padding: '20px 30px', borderRadius: 24, letterSpacing: '0.1em', fontFamily: 'sans-serif' }}>
-        CANCELLED
-      </div>
-    </div>
-  );
-
+  const isCancelled = currentBill.status === 'CANCELLED';
   const samePage = includeGatePass && fitsOnePage === true;
   const newPage  = includeGatePass && fitsOnePage === false;
 
   const Doc = (
     <>
-      {/* Invisible probe to measure content height */}
+      {/* Invisible probe */}
       {includeGatePass && (
-        <div
-          ref={probeRef}
-          style={{
-            position: 'fixed',
-            top: '-9999px',
-            left: '-9999px',
-            width: '210mm',
-            visibility: 'hidden',
-            pointerEvents: 'none',
-            fontFamily: "'Georgia', 'Times New Roman', serif",
-            fontSize: 12,
-            lineHeight: 1.55,
-            padding: '0 14mm',
-            boxSizing: 'border-box',
-          }}
-        >
+        <div ref={probeRef} style={{ position: 'fixed', top: '-9999px', left: '-9999px', width: '210mm', visibility: 'hidden', pointerEvents: 'none', fontFamily: "'Georgia', 'Times New Roman', serif", fontSize: 12, lineHeight: 1.55, padding: '0 14mm', boxSizing: 'border-box' }}>
           <InvoiceHeader currentBill={currentBill} />
           <InvoiceContent currentBill={currentBill} />
         </div>
@@ -364,7 +349,8 @@ const BillPreview = ({ currentBill, includeGatePass }) => {
       {/* MODE A: no gate pass */}
       {!includeGatePass && (
         <div style={{ ...pageBase, minHeight: '297mm', display: 'flex', flexDirection: 'column', position: 'relative' }}>
-          {cancelledWatermark}
+          {/* FIX #4: watermark above content */}
+          {isCancelled && <CancelledWatermark />}
           <div style={{ position: 'relative', zIndex: 10, flex: 1, display: 'flex', flexDirection: 'column' }}>
             <InvoiceHeader currentBill={currentBill} />
             <InvoiceContent currentBill={currentBill} />
@@ -374,10 +360,10 @@ const BillPreview = ({ currentBill, includeGatePass }) => {
         </div>
       )}
 
-      {/* MODE B: gate pass requested, still measuring */}
+      {/* MODE B: measuring */}
       {includeGatePass && fitsOnePage === null && (
         <div style={{ ...pageBase, minHeight: '297mm', display: 'flex', flexDirection: 'column', position: 'relative' }}>
-          {cancelledWatermark}
+          {isCancelled && <CancelledWatermark />}
           <div style={{ position: 'relative', zIndex: 10, flex: 1, display: 'flex', flexDirection: 'column' }}>
             <InvoiceHeader currentBill={currentBill} />
             <InvoiceContent currentBill={currentBill} />
@@ -387,10 +373,10 @@ const BillPreview = ({ currentBill, includeGatePass }) => {
         </div>
       )}
 
-      {/* MODE C: fits on one page */}
+      {/* MODE C: fits one page */}
       {samePage && (
         <div style={{ ...pageBase, height: '297mm', display: 'flex', flexDirection: 'column', position: 'relative', overflow: 'hidden' }}>
-          {cancelledWatermark}
+          {isCancelled && <CancelledWatermark />}
           <div style={{ position: 'relative', zIndex: 10, flex: 1, display: 'flex', flexDirection: 'column' }}>
             <InvoiceHeader currentBill={currentBill} />
             <InvoiceContent currentBill={currentBill} />
@@ -403,11 +389,11 @@ const BillPreview = ({ currentBill, includeGatePass }) => {
         </div>
       )}
 
-      {/* MODE D: doesn't fit — gate pass on new page */}
+      {/* MODE D: gate pass on new page */}
       {newPage && (
         <>
           <div style={{ ...pageBase, minHeight: '297mm', display: 'flex', flexDirection: 'column', position: 'relative' }}>
-            {cancelledWatermark}
+            {isCancelled && <CancelledWatermark />}
             <div style={{ position: 'relative', zIndex: 10, flex: 1, display: 'flex', flexDirection: 'column' }}>
               <InvoiceHeader currentBill={currentBill} />
               <InvoiceContent currentBill={currentBill} />
@@ -415,15 +401,7 @@ const BillPreview = ({ currentBill, includeGatePass }) => {
               <BankFooter />
             </div>
           </div>
-          <div style={{
-            ...pageBase,
-            minHeight: '297mm',
-            display: 'flex',
-            flexDirection: 'column',
-            breakBefore: 'page',
-            pageBreakBefore: 'always',
-            marginTop: 16,
-          }}>
+          <div style={{ ...pageBase, minHeight: '297mm', display: 'flex', flexDirection: 'column', breakBefore: 'page', pageBreakBefore: 'always', marginTop: 16 }}>
             <GatePassBody currentBill={currentBill} />
           </div>
         </>
@@ -434,18 +412,11 @@ const BillPreview = ({ currentBill, includeGatePass }) => {
   return (
     <>
       {/* On-screen preview */}
-      <div
-        className="print:hidden"
-        style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', background: '#e5e7eb', padding: '24px 0', minHeight: '100%', overflowY: 'auto' }}
-      >
+      <div className="print:hidden" style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', background: '#e5e7eb', padding: '24px 0', minHeight: '100%', overflowY: 'auto' }}>
         {Doc}
       </div>
-
       {/* Print portal */}
-      {createPortal(
-        <div>{Doc}</div>,
-        document.getElementById('print-portal')
-      )}
+      {createPortal(<div>{Doc}</div>, document.getElementById('print-portal'))}
     </>
   );
 };
