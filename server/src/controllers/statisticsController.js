@@ -2,12 +2,8 @@ import db from '../db/index.js';
 
 export const getDashboardStats = async (req, res) => {
   try {
-    const { period } = req.query; // 'day', 'week', 'month'
+    const { period } = req.query;
 
-    // FIX: Previously used raw string interpolation directly in the SQL query body,
-    // which is a SQL injection risk AND caused the 'day' filter to be wrong
-    // (CURRENT_DATE alone is not a range check — bills FROM that date would need >= CURRENT_DATE).
-    // Now we use a parameterized query with a computed cutoff date passed as $1.
     let cutoffDate;
     const now = new Date();
 
@@ -20,11 +16,9 @@ export const getDashboardStats = async (req, res) => {
       d.setMonth(d.getMonth() - 1);
       cutoffDate = d.toISOString().split('T')[0];
     } else {
-      // 'day' — today only
       cutoffDate = now.toISOString().split('T')[0];
     }
 
-    // 1. Bill totals and counts (excluding cancelled)
     const billStats = await db.query(
       `SELECT 
         COUNT(id) as total_bills,
@@ -34,7 +28,6 @@ export const getDashboardStats = async (req, res) => {
       [cutoffDate]
     );
 
-    // 2. Items sold — FIX: was `i.name` (wrong column), correct is `i.item_name`
     const itemStats = await db.query(
       `SELECT 
         i.item_name AS name, 
@@ -50,7 +43,6 @@ export const getDashboardStats = async (req, res) => {
       [cutoffDate]
     );
 
-    // 3. External Bills breakdown
     const externalStats = await db.query(
       `SELECT 
         t.name,
@@ -75,7 +67,82 @@ export const getDashboardStats = async (req, res) => {
   }
 };
 
-// NEW: Paginated audit logs endpoint
+// ── NEW: Sales by Item report with full date range support ───────────────────
+// Supports: period (day/week/month) OR custom fromDate + toDate
+export const getSalesByItem = async (req, res) => {
+  try {
+    const { period, fromDate, toDate } = req.query;
+
+    let startDate, endDate;
+    const now = new Date();
+    const todayStr = now.toISOString().split('T')[0];
+
+    if (fromDate && toDate) {
+      // Custom date range takes priority
+      startDate = fromDate;
+      endDate = toDate;
+    } else {
+      // Period-based
+      endDate = todayStr;
+      if (period === 'week') {
+        const d = new Date(now);
+        d.setDate(d.getDate() - 6); // inclusive of today → last 7 days
+        startDate = d.toISOString().split('T')[0];
+      } else if (period === 'month') {
+        const d = new Date(now);
+        d.setDate(1); // first day of current month
+        startDate = d.toISOString().split('T')[0];
+      } else {
+        // 'day' = today only
+        startDate = todayStr;
+      }
+    }
+
+    // Main sales-by-item query
+    const result = await db.query(
+      `SELECT 
+        i.item_name AS item_name,
+        SUM(bli.qty)        AS quantity_sold,
+        SUM(bli.line_total) AS amount,
+        CASE 
+          WHEN SUM(bli.qty) > 0 
+          THEN ROUND(SUM(bli.taxable_value) / SUM(bli.qty), 2)
+          ELSE 0
+        END AS average_price
+      FROM bill_line_items bli
+      JOIN bills b ON bli.bill_id = b.id
+      JOIN items i ON bli.item_id = i.id
+      WHERE b.date >= $1 
+        AND b.date <= $2
+        AND b.status = 'ACTIVE'
+      GROUP BY i.id, i.item_name
+      ORDER BY SUM(bli.qty) DESC`,
+      [startDate, endDate]
+    );
+
+    // Totals
+    const totals = result.rows.reduce(
+      (acc, row) => {
+        acc.total_qty    += Number(row.quantity_sold);
+        acc.total_amount += Number(row.amount);
+        return acc;
+      },
+      { total_qty: 0, total_amount: 0 }
+    );
+
+    res.json({
+      rows: result.rows,
+      totals,
+      startDate,
+      endDate,
+    });
+  } catch (error) {
+    console.error('Sales By Item Error:', error);
+    res.status(500).json({ error: 'Failed to fetch sales by item report' });
+  }
+};
+
+// ── Paginated audit logs ─────────────────────────────────────────────────────
 export const getAuditLogs = async (req, res) => {
   try {
     const page     = Math.max(1, parseInt(req.query.page  || '1', 10));
@@ -97,7 +164,6 @@ export const getAuditLogs = async (req, res) => {
     );
     const total = parseInt(countResult.rows[0].total, 10);
 
-    // Add pagination params after optional search param
     const dataParams = [...params, pageSize, offset];
     const searchParamCount = params.length;
 
