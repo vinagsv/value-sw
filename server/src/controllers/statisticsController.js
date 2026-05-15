@@ -67,8 +67,9 @@ export const getDashboardStats = async (req, res) => {
   }
 };
 
-// ── NEW: Sales by Item report with full date range support ───────────────────
-// Supports: period (day/week/month) OR custom fromDate + toDate
+// ── Sales by Item report ──────────────────────────────────────────────────────
+// Returns per-item: quantity, totals and per-unit prices both excl. and incl. GST
+// Per-unit incl. GST and avg selling price are rounded to nearest whole rupee.
 export const getSalesByItem = async (req, res) => {
   try {
     const { period, fromDate, toDate } = req.query;
@@ -78,41 +79,52 @@ export const getSalesByItem = async (req, res) => {
     const todayStr = now.toISOString().split('T')[0];
 
     if (fromDate && toDate) {
-      // Custom date range takes priority
       startDate = fromDate;
-      endDate = toDate;
+      endDate   = toDate;
     } else {
-      // Period-based
       endDate = todayStr;
       if (period === 'week') {
         const d = new Date(now);
-        d.setDate(d.getDate() - 6); // inclusive of today → last 7 days
+        d.setDate(d.getDate() - 6);
         startDate = d.toISOString().split('T')[0];
       } else if (period === 'month') {
         const d = new Date(now);
-        d.setDate(1); // first day of current month
+        d.setDate(1);
         startDate = d.toISOString().split('T')[0];
       } else {
-        // 'day' = today only
         startDate = todayStr;
       }
     }
 
-    // Main sales-by-item query
     const result = await db.query(
       `SELECT 
-        i.item_name AS item_name,
-        SUM(bli.qty)        AS quantity_sold,
-        SUM(bli.line_total) AS amount,
-        CASE 
-          WHEN SUM(bli.qty) > 0 
+        i.item_name                            AS item_name,
+        SUM(bli.qty)                           AS quantity_sold,
+
+        -- Totals
+        SUM(bli.taxable_value)                 AS total_excl_gst,
+        SUM(bli.line_total)                    AS total_incl_gst,
+
+        -- Per-unit excl. GST: keep 2dp (used as tax calculation base)
+        CASE WHEN SUM(bli.qty) > 0
           THEN ROUND(SUM(bli.taxable_value) / SUM(bli.qty), 2)
-          ELSE 0
-        END AS average_price
+          ELSE 0 END                           AS unit_price_excl_gst,
+
+        -- Per-unit incl. GST: rounded to whole rupee (consumer selling price)
+        CASE WHEN SUM(bli.qty) > 0
+          THEN ROUND(SUM(bli.line_total) / SUM(bli.qty))
+          ELSE 0 END                           AS unit_price_incl_gst,
+
+        -- Average selling price incl. GST: whole rupee
+        -- Reflects actual average final price paid per unit (accounts for discounts)
+        CASE WHEN SUM(bli.qty) > 0
+          THEN ROUND(SUM(bli.line_total) / SUM(bli.qty))
+          ELSE 0 END                           AS avg_price_incl_gst
+
       FROM bill_line_items bli
       JOIN bills b ON bli.bill_id = b.id
       JOIN items i ON bli.item_id = i.id
-      WHERE b.date >= $1 
+      WHERE b.date >= $1
         AND b.date <= $2
         AND b.status = 'ACTIVE'
       GROUP BY i.id, i.item_name
@@ -120,29 +132,24 @@ export const getSalesByItem = async (req, res) => {
       [startDate, endDate]
     );
 
-    // Totals
     const totals = result.rows.reduce(
       (acc, row) => {
-        acc.total_qty    += Number(row.quantity_sold);
-        acc.total_amount += Number(row.amount);
+        acc.total_qty      += Number(row.quantity_sold);
+        acc.total_excl_gst += Number(row.total_excl_gst);
+        acc.total_incl_gst += Number(row.total_incl_gst);
         return acc;
       },
-      { total_qty: 0, total_amount: 0 }
+      { total_qty: 0, total_excl_gst: 0, total_incl_gst: 0 }
     );
 
-    res.json({
-      rows: result.rows,
-      totals,
-      startDate,
-      endDate,
-    });
+    res.json({ rows: result.rows, totals, startDate, endDate });
   } catch (error) {
     console.error('Sales By Item Error:', error);
     res.status(500).json({ error: 'Failed to fetch sales by item report' });
   }
 };
 
-// ── Paginated audit logs ─────────────────────────────────────────────────────
+// ── Paginated audit logs ──────────────────────────────────────────────────────
 export const getAuditLogs = async (req, res) => {
   try {
     const page     = Math.max(1, parseInt(req.query.page  || '1', 10));

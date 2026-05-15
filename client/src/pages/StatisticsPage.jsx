@@ -5,6 +5,8 @@ import {
   RefreshCcw, Lock, FileText, X, Calendar,
 } from 'lucide-react';
 import * as XLSX from 'xlsx';
+import { jsPDF } from 'jspdf';
+import autoTable from 'jspdf-autotable';
 import { fetchDashboardStats, fetchAuditLogs, fetchSalesByItem } from '../api/statistics';
 import { fetchBills } from '../api/bills';
 import BulkDeleteModal from '../components/history/BulkDeleteModal';
@@ -14,72 +16,111 @@ import { useAuth } from '../context/AuthContext';
 // Helpers
 // ─────────────────────────────────────────────────────────────────────────────
 
-const fmt    = n => Number(n || 0).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+const r    = n => Math.round(Number(n || 0)); // round to nearest rupee
+const fmt  = n => Number(n || 0).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 const fmtQty = n => Number(n || 0).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+const fmtRs  = n => '₹' + r(n).toLocaleString('en-IN'); // whole-rupee display
+const fmtWhole = n => '₹' + r(n).toLocaleString('en-IN'); // alias for clarity
 
 // ─────────────────────────────────────────────────────────────────────────────
-// PDF export — matches sample PDF layout exactly
+// Real PDF download via jsPDF + jsPDF-AutoTable
+// Columns: Item Name | Qty Sold | Total (Incl. GST) | Per Unit (Excl. GST) | Per Unit (Incl. GST) | Avg Selling Price
 // ─────────────────────────────────────────────────────────────────────────────
 
-const printSalesByItemPdf = (reportData, dateLabel, companyName = 'VALUE MOTOR AGENCY PVT LTD') => {
+const downloadSalesByItemPdf = (reportData, dateLabel, companyName = 'VALUE MOTOR AGENCY PVT LTD') => {
   const { rows, totals } = reportData;
-  const navy = '#1a3a6b';
-  const light = '#f7f9fc';
+  const navy = [26, 58, 107]; // #1a3a6b as RGB
 
-  const tableRows = rows.map((r, i) => `
-    <tr style="background:${i % 2 === 0 ? '#fff' : light}">
-      <td style="padding:6px 10px;border-bottom:1px solid #e5e7eb;font-size:11px;font-family:sans-serif">${r.item_name}</td>
-      <td style="padding:6px 10px;border-bottom:1px solid #e5e7eb;font-size:11px;text-align:right;font-family:sans-serif">${fmtQty(r.quantity_sold)}</td>
-      <td style="padding:6px 10px;border-bottom:1px solid #e5e7eb;font-size:11px;text-align:right;font-family:sans-serif">&#x20B9;${fmt(r.amount)}</td>
-      <td style="padding:6px 10px;border-bottom:1px solid #e5e7eb;font-size:11px;text-align:right;font-family:sans-serif">&#x20B9;${fmt(r.average_price)}</td>
-    </tr>`).join('');
+  // Portrait A4: 210mm wide, 14mm margins each side = 182mm usable.
+  // Item Name gets 72mm; the 5 numeric columns share the remaining 110mm (~22mm each).
+  const doc = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' });
 
-  const html = `<!DOCTYPE html><html><head><meta charset="UTF-8"/><title>Sales by Item</title>
-  <style>
-    @page{size:A4 portrait;margin:14mm 14mm 10mm}
-    *{box-sizing:border-box;-webkit-print-color-adjust:exact;print-color-adjust:exact}
-    body{font-family:sans-serif;font-size:12px;color:#111;margin:0;padding:0}
-    table{width:100%;border-collapse:collapse}
-  </style></head><body>
-  <div style="text-align:right;margin-bottom:6px">
-    <div style="font-size:15px;font-weight:900;text-transform:uppercase;color:${navy};letter-spacing:.03em;font-family:sans-serif">${companyName}</div>
-  </div>
-  <div style="border-top:2px solid ${navy};border-bottom:2px solid ${navy};padding:5px 0;text-align:center;margin-bottom:14px">
-    <div style="font-size:13px;font-weight:800;color:${navy};letter-spacing:.1em;text-transform:uppercase;font-family:sans-serif">Sales by Item</div>
-    <div style="font-size:10px;color:#555;margin-top:3px;font-family:sans-serif">${dateLabel}</div>
-  </div>
-  <table>
-    <thead>
-      <tr style="background:${navy}">
-        <th style="padding:7px 10px;color:#fff;font-size:9px;text-align:left;text-transform:uppercase;letter-spacing:.06em;font-family:sans-serif">Item Name</th>
-        <th style="padding:7px 10px;color:#fff;font-size:9px;text-align:right;text-transform:uppercase;letter-spacing:.06em;font-family:sans-serif">Quantity Sold</th>
-        <th style="padding:7px 10px;color:#fff;font-size:9px;text-align:right;text-transform:uppercase;letter-spacing:.06em;font-family:sans-serif">Amount</th>
-        <th style="padding:7px 10px;color:#fff;font-size:9px;text-align:right;text-transform:uppercase;letter-spacing:.06em;font-family:sans-serif">Average Price</th>
-      </tr>
-    </thead>
-    <tbody>
-      ${tableRows}
-      <tr style="border-top:2px solid ${navy}">
-        <td style="padding:8px 10px;font-weight:800;font-size:11.5px;text-transform:uppercase;color:${navy};font-family:sans-serif">TOTAL</td>
-        <td style="padding:8px 10px;font-weight:800;font-size:11.5px;text-align:right;color:${navy};font-family:sans-serif">${fmtQty(totals.total_qty)}</td>
-        <td style="padding:8px 10px;font-weight:800;font-size:11.5px;text-align:right;color:${navy};font-family:sans-serif">&#x20B9;${fmt(totals.total_amount)}</td>
-        <td style="padding:8px 10px"></td>
-      </tr>
-    </tbody>
-  </table>
-  </body></html>`;
+  // Header
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(14);
+  doc.setTextColor(...navy);
+  doc.text(companyName, 14, 14);
 
-  const iframe = document.createElement('iframe');
-  iframe.style.cssText = 'position:fixed;top:-9999px;left:-9999px;width:210mm;height:297mm;border:none;opacity:0;pointer-events:none';
-  document.body.appendChild(iframe);
-  iframe.contentDocument.open();
-  iframe.contentDocument.write(html);
-  iframe.contentDocument.close();
-  setTimeout(() => {
-    iframe.contentWindow.focus();
-    iframe.contentWindow.print();
-    setTimeout(() => document.body.removeChild(iframe), 2500);
-  }, 350);
+  doc.setFontSize(9);
+  doc.setFont('helvetica', 'normal');
+  doc.setTextColor(80, 80, 80);
+  doc.text('Sales by Item Report', 14, 20);
+  doc.text(dateLabel, doc.internal.pageSize.getWidth() - 14, 20, { align: 'right' });
+
+  // Divider
+  doc.setDrawColor(...navy);
+  doc.setLineWidth(0.5);
+  doc.line(14, 23, doc.internal.pageSize.getWidth() - 14, 23);
+
+  // Table body rows
+  // - Total shown as incl. GST only (whole rupee)
+  // - Per Unit Excl. GST kept at 2dp (tax calculation base)
+  // - Per Unit Incl. GST rounded to whole rupee
+  // - Avg Selling Price rounded to whole rupee
+  const tableBody = rows.map(row => [
+    row.item_name,
+    fmtQty(row.quantity_sold),
+    r(row.total_incl_gst).toLocaleString('en-IN'),
+    fmt(row.unit_price_excl_gst),
+    r(row.unit_price_incl_gst).toLocaleString('en-IN'),
+    r(row.avg_price_incl_gst).toLocaleString('en-IN'),
+  ]);
+
+  // Totals row
+  tableBody.push([
+    'TOTAL',
+    fmtQty(totals.total_qty),
+    r(totals.total_incl_gst).toLocaleString('en-IN'),
+    '',
+    '',
+    '',
+  ]);
+
+  autoTable(doc, {
+    startY: 27,
+    head: [[
+      'Item Name',
+      'Qty Sold',
+      'Total (Incl. GST)',
+      'Per Unit (Excl. GST)',
+      'Per Unit (Incl. GST)',
+      'Avg Selling Price',
+    ]],
+    body: tableBody,
+    styles: {
+      font: 'helvetica',
+      fontSize: 8.5,
+      cellPadding: 3,
+    },
+    headStyles: {
+      fillColor: navy,
+      textColor: [255, 255, 255],
+      fontStyle: 'bold',
+      fontSize: 8,
+      halign: 'right',
+    },
+    columnStyles: {
+      0: { halign: 'left',  cellWidth: 72 }, // Item Name — wider to fill portrait page
+      1: { halign: 'right', cellWidth: 18 }, // Qty Sold
+      2: { halign: 'right', cellWidth: 26 }, // Total Incl. GST
+      3: { halign: 'right', cellWidth: 24 }, // Per Unit Excl. GST
+      4: { halign: 'right', cellWidth: 24 }, // Per Unit Incl. GST
+      5: { halign: 'right', cellWidth: 18 }, // Avg Selling Price
+    },
+    // Style the last row (totals) differently
+    didParseCell: (data) => {
+      if (data.row.index === tableBody.length - 1) {
+        data.cell.styles.fontStyle = 'bold';
+        data.cell.styles.textColor = navy;
+        data.cell.styles.lineWidth = { top: 0.5 };
+        data.cell.styles.lineColor = navy;
+      }
+    },
+    alternateRowStyles: { fillColor: [247, 249, 252] },
+    margin: { left: 14, right: 14 },
+  });
+
+  doc.save(`VMA_Sales_by_Item_${reportData.startDate}_to_${reportData.endDate}.pdf`);
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -90,20 +131,20 @@ const BAR_COLORS = ['#3b82f6','#10b981','#f59e0b','#ef4444','#8b5cf6','#06b6d4',
 
 const SalesByItemChart = ({ rows, isDark }) => {
   if (!rows?.length) return null;
-  const maxQty = Math.max(...rows.map(r => Number(r.quantity_sold)));
+  const maxQty = Math.max(...rows.map(row => Number(row.quantity_sold)));
   return (
     <div className="space-y-2.5">
-      {rows.map((r, i) => {
-        const pct   = maxQty > 0 ? (Number(r.quantity_sold) / maxQty) * 100 : 0;
+      {rows.map((row, i) => {
+        const pct   = maxQty > 0 ? (Number(row.quantity_sold) / maxQty) * 100 : 0;
         const color = BAR_COLORS[i % BAR_COLORS.length];
         return (
           <div key={i} className="flex items-center gap-3 min-w-0">
             <div
               className={`text-xs font-medium shrink-0 truncate ${isDark ? 'text-gray-300' : 'text-gray-600'}`}
               style={{ width: 160 }}
-              title={r.item_name}
+              title={row.item_name}
             >
-              {r.item_name}
+              {row.item_name}
             </div>
             <div
               className="relative flex-1 h-6 rounded-md overflow-hidden"
@@ -113,15 +154,18 @@ const SalesByItemChart = ({ rows, isDark }) => {
                 className="absolute inset-y-0 left-0 rounded-md transition-all duration-700 ease-out"
                 style={{ width: `${Math.max(pct, 2)}%`, background: color, opacity: 0.82 }}
               />
-              <span className="absolute inset-0 flex items-center pl-2.5 text-[10px] font-bold text-white" style={{ mixBlendMode: 'plus-lighter' }}>
-                {fmtQty(r.quantity_sold)} units
+              <span
+                className="absolute inset-0 flex items-center pl-2.5 text-[10px] font-bold text-white"
+                style={{ mixBlendMode: 'plus-lighter' }}
+              >
+                {fmtQty(row.quantity_sold)} units
               </span>
             </div>
             <div
               className={`text-xs font-bold tabular-nums shrink-0 text-right ${isDark ? 'text-emerald-400' : 'text-emerald-700'}`}
               style={{ width: 90 }}
             >
-              ₹{fmt(r.amount)}
+              {fmtRs(row.total_incl_gst)}
             </div>
           </div>
         );
@@ -181,10 +225,10 @@ const Pagination = ({ page, totalPages, onGoTo, isDark }) => {
 // ─────────────────────────────────────────────────────────────────────────────
 
 const actionColor = action => {
-  if (action.includes('DELETE')) return { bg: 'bg-red-100 dark:bg-red-900/30',    text: 'text-red-600 dark:text-red-400' };
-  if (action.includes('IMPORT')) return { bg: 'bg-blue-100 dark:bg-blue-900/30',  text: 'text-blue-600 dark:text-blue-400' };
-  if (action.includes('ADJUST')) return { bg: 'bg-amber-100 dark:bg-amber-900/30',text: 'text-amber-600 dark:text-amber-400' };
-  if (action.includes('USER'))   return { bg: 'bg-purple-100 dark:bg-purple-900/30',text: 'text-purple-600 dark:text-purple-400' };
+  if (action.includes('DELETE')) return { bg: 'bg-red-100 dark:bg-red-900/30',     text: 'text-red-600 dark:text-red-400' };
+  if (action.includes('IMPORT')) return { bg: 'bg-blue-100 dark:bg-blue-900/30',   text: 'text-blue-600 dark:text-blue-400' };
+  if (action.includes('ADJUST')) return { bg: 'bg-amber-100 dark:bg-amber-900/30', text: 'text-amber-600 dark:text-amber-400' };
+  if (action.includes('USER'))   return { bg: 'bg-purple-100 dark:bg-purple-900/30', text: 'text-purple-600 dark:text-purple-400' };
   return { bg: 'bg-gray-100 dark:bg-gray-700', text: 'text-gray-600 dark:text-gray-400' };
 };
 
@@ -196,37 +240,31 @@ const StatisticsPage = ({ theme }) => {
   const isDark = theme === 'dark';
   const { isAdmin } = useAuth();
 
-  // ── Unified period — one selector drives EVERYTHING ───────────────────────
   const [period,     setPeriod]     = useState('month');
   const [customFrom, setCustomFrom] = useState('');
   const [customTo,   setCustomTo]   = useState('');
 
-  // ── Data ──────────────────────────────────────────────────────────────────
   const [stats,     setStats]     = useState(null);
   const [statsLoad, setStatsLoad] = useState(true);
   const [sbiData,   setSbiData]   = useState(null);
   const [sbiLoad,   setSbiLoad]   = useState(false);
   const [sbiExport, setSbiExport] = useState(false);
 
-  // ── Bill export dropdown ──────────────────────────────────────────────────
   const [showExport, setShowExport] = useState(false);
   const [expFrom,    setExpFrom]    = useState('');
   const [expTo,      setExpTo]      = useState('');
   const [exporting,  setExporting]  = useState(false);
 
-  // ── Bulk delete ───────────────────────────────────────────────────────────
   const [bulkOpen, setBulkOpen] = useState(false);
 
-  // ── Audit log ─────────────────────────────────────────────────────────────
-  const [auditLogs,       setAuditLogs]       = useState([]);
-  const [auditTotal,      setAuditTotal]      = useState(0);
-  const [auditPage,       setAuditPage]       = useState(1);
-  const [auditTotalPages, setAuditTotalPages] = useState(1);
-  const [auditSearch,     setAuditSearch]     = useState('');
-  const [auditLoad,       setAuditLoad]       = useState(false);
+  const [auditLogs,        setAuditLogs]       = useState([]);
+  const [auditTotal,       setAuditTotal]      = useState(0);
+  const [auditPage,        setAuditPage]       = useState(1);
+  const [auditTotalPages,  setAuditTotalPages] = useState(1);
+  const [auditSearch,      setAuditSearch]     = useState('');
+  const [auditLoad,        setAuditLoad]       = useState(false);
   const AUDIT_LIMIT = 15;
 
-  // ── Build query params for the current period ─────────────────────────────
   const buildSbiParams = useCallback(() => {
     if (period === 'custom') {
       if (!customFrom || !customTo) return null;
@@ -235,15 +273,13 @@ const StatisticsPage = ({ theme }) => {
     return { period };
   }, [period, customFrom, customTo]);
 
-  // ── Load dashboard + SBI in parallel ─────────────────────────────────────
   const loadAll = useCallback(async () => {
     const sbiParams = buildSbiParams();
-    if (!sbiParams) return; // custom with incomplete dates
+    if (!sbiParams) return;
 
     setStatsLoad(true);
     setSbiLoad(true);
 
-    // Dashboard summary uses named periods (day/week/month); custom falls back to month for headline numbers
     const summaryPeriod = period === 'custom' ? 'month' : period;
 
     const [summaryRes, sbiRes] = await Promise.allSettled([
@@ -262,16 +298,15 @@ const StatisticsPage = ({ theme }) => {
     if (period !== 'custom') loadAll();
   }, [period]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // ── Audit log ─────────────────────────────────────────────────────────────
   const loadAuditLogs = useCallback(async (pg = 1, search = '') => {
     if (!isAdmin) return;
     setAuditLoad(true);
     try {
-      const r = await fetchAuditLogs({ page: pg, limit: AUDIT_LIMIT, search });
-      setAuditLogs(r.logs);
-      setAuditTotal(r.total);
-      setAuditPage(r.page);
-      setAuditTotalPages(r.totalPages);
+      const res = await fetchAuditLogs({ page: pg, limit: AUDIT_LIMIT, search });
+      setAuditLogs(res.logs);
+      setAuditTotal(res.total);
+      setAuditPage(res.page);
+      setAuditTotalPages(res.totalPages);
     } catch { /* silent */ }
     setAuditLoad(false);
   }, [isAdmin]);
@@ -284,33 +319,48 @@ const StatisticsPage = ({ theme }) => {
     if (v.length === 0 || v.length > 2) loadAuditLogs(1, v);
   };
 
-  // ── Bill Excel export (two-sheet) ─────────────────────────────────────────
+  // ── Bill Excel export ─────────────────────────────────────────────────────
   const doExportBills = async () => {
     setExporting(true);
     try {
       const bills = await fetchBills(expFrom && expTo ? { fromDate: expFrom, toDate: expTo } : {});
       if (!bills?.length) { alert('No bills found.'); setExporting(false); return; }
 
-      const summaryRows = bills.map(b => ({
-        'Invoice No':      b.bill_no,
-        'Date':            new Date(b.date).toLocaleDateString('en-IN'),
-        'Customer Name':   b.customer_name,
-        'Mobile':          b.customer_mobile || '',
-        'Vehicle Reg No':  b.vehicle_reg_no  || '',
-        'GSTIN':           b.customer_gstin  || '',
-        'Job Card No':     b.job_card_no     || '',
-        'Taxable (₹)':     Number(b.subtotal),
-        'GST (₹)':         Number(b.total_tax),
-        'Discount (₹)':    Number(b.discount_amount),
-        'Grand Total (₹)': Number(b.grand_total),
-        'Status':          b.status,
-      }));
+      // ── Sheet 1: Invoice Summary ──────────────────────────────────────────
+      const summaryRows = bills.map(b => {
+        const itemNames = (b.line_items || [])
+          .map(i => i.name)
+          .filter(Boolean)
+          .join(', ') || '—';
 
+        return {
+          'Invoice No':      b.bill_no,
+          'Date':            new Date(b.date).toLocaleDateString('en-IN'),
+          'Customer Name':   b.customer_name,
+          'Job Card No':     b.job_card_no     || '',
+          'Items':           itemNames,
+          'Taxable (₹)':     Number(b.subtotal),
+          'GST (₹)':         Number(b.total_tax),
+          'Discount (₹)':    Number(b.discount_amount),
+          'Grand Total (₹)': Math.round(Number(b.grand_total)),
+          'Mobile':          b.customer_mobile || '',
+          'Vehicle Reg No':  b.vehicle_reg_no  || '',
+          'GSTIN':           b.customer_gstin  || '',
+          'Status':          b.status,
+        };
+      });
+
+      // ── Sheet 2: Line Items ───────────────────────────────────────────────
       const lineRows = [];
       bills.forEach(b => {
         const items = b.line_items || [];
         if (!items.length) {
-          lineRows.push({ 'Invoice No': b.bill_no, 'Date': new Date(b.date).toLocaleDateString('en-IN'), 'Customer Name': b.customer_name, 'Item Name': '(no items)' });
+          lineRows.push({
+            'Invoice No':    b.bill_no,
+            'Date':          new Date(b.date).toLocaleDateString('en-IN'),
+            'Customer Name': b.customer_name,
+            'Item Name':     '(no items)',
+          });
         } else {
           items.forEach(item => lineRows.push({
             'Invoice No':        b.bill_no,
@@ -318,7 +368,7 @@ const StatisticsPage = ({ theme }) => {
             'Customer Name':     b.customer_name,
             'Vehicle Reg No':    b.vehicle_reg_no || '',
             'Item Name':         item.name,
-            'HSN/SAC':           item.hsn_code || '',
+            'HSN/SAC':           item.hsn_code    || '',
             'Qty':               Number(item.qty),
             'Rate (₹)':          Number(item.custom_rate),
             'Tax %':             Number(item.tax_rate),
@@ -332,10 +382,10 @@ const StatisticsPage = ({ theme }) => {
       });
 
       const aw = rows => rows.length === 0 ? [] : Object.keys(rows[0]).map(k => ({
-        wch: Math.max(k.length, ...rows.map(r => String(r[k] ?? '').length)) + 2
+        wch: Math.max(k.length, ...rows.map(row => String(row[k] ?? '').length)) + 2,
       }));
 
-      const wb = XLSX.utils.book_new();
+      const wb  = XLSX.utils.book_new();
       const ws1 = XLSX.utils.json_to_sheet(summaryRows); ws1['!cols'] = aw(summaryRows);
       const ws2 = XLSX.utils.json_to_sheet(lineRows);    ws2['!cols'] = aw(lineRows);
       XLSX.utils.book_append_sheet(wb, ws1, 'Invoice Summary');
@@ -343,38 +393,53 @@ const StatisticsPage = ({ theme }) => {
       const suf = expFrom && expTo ? `_${expFrom}_to_${expTo}` : `_all_${new Date().toISOString().split('T')[0]}`;
       XLSX.writeFile(wb, `VMA_Invoices${suf}.xlsx`);
       setShowExport(false); setExpFrom(''); setExpTo('');
-    } catch { alert('Export failed.'); }
+    } catch (err) {
+      console.error(err);
+      alert('Export failed.');
+    }
     setExporting(false);
   };
 
-  // ── Sales by Item exports ─────────────────────────────────────────────────
+  // ── Sales by Item — Excel export ──────────────────────────────────────────
+  // Columns: Item Name | Qty Sold | Total Incl. GST | Per Unit Excl. GST | Per Unit Incl. GST | Avg Selling Price
+  // All incl-GST money values are whole rupees. Excl-GST per unit keeps 2dp.
   const doSbiExcel = () => {
     if (!sbiData?.rows?.length) { alert('No data to export.'); return; }
     setSbiExport(true);
     const rows = [
-      ...sbiData.rows.map(r => ({
-        'Item Name':         r.item_name,
-        'Quantity Sold':     Number(r.quantity_sold),
-        'Amount (₹)':        Number(r.amount),
-        'Average Price (₹)': Number(r.average_price),
+      ...sbiData.rows.map(row => ({
+        'Item Name':               row.item_name,
+        'Qty Sold':                Number(row.quantity_sold),
+        'Total Incl. GST (₹)':    Math.round(Number(row.total_incl_gst)),
+        'Per Unit Excl. GST (₹)': Number(row.unit_price_excl_gst),
+        'Per Unit Incl. GST (₹)': Math.round(Number(row.unit_price_incl_gst)),
+        'Avg Selling Price (₹)':   Math.round(Number(row.avg_price_incl_gst)),
       })),
-      { 'Item Name': 'TOTAL', 'Quantity Sold': Number(sbiData.totals.total_qty), 'Amount (₹)': Number(sbiData.totals.total_amount), 'Average Price (₹)': '' },
+      {
+        'Item Name':               'TOTAL',
+        'Qty Sold':                Number(sbiData.totals.total_qty),
+        'Total Incl. GST (₹)':    Math.round(Number(sbiData.totals.total_incl_gst)),
+        'Per Unit Excl. GST (₹)': '',
+        'Per Unit Incl. GST (₹)': '',
+        'Avg Selling Price (₹)':  '',
+      },
     ];
     const ws = XLSX.utils.json_to_sheet(rows);
-    ws['!cols'] = [{ wch: 40 }, { wch: 16 }, { wch: 16 }, { wch: 20 }];
+    ws['!cols'] = [{ wch: 40 }, { wch: 12 }, { wch: 22 }, { wch: 24 }, { wch: 24 }, { wch: 22 }];
     const wb = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb, ws, 'Sales by Item');
     XLSX.writeFile(wb, `VMA_Sales_by_Item_${sbiData.startDate}_to_${sbiData.endDate}.xlsx`);
     setSbiExport(false);
   };
 
+  // ── Sales by Item — real PDF download via jsPDF ───────────────────────────
   const doSbiPdf = () => {
     if (!sbiData?.rows?.length) { alert('No data to export.'); return; }
     const label = `From ${new Date(sbiData.startDate + 'T00:00:00').toLocaleDateString('en-IN')} To ${new Date(sbiData.endDate + 'T00:00:00').toLocaleDateString('en-IN')}`;
-    printSalesByItemPdf(sbiData, label);
+    downloadSalesByItemPdf(sbiData, label);
   };
 
-  // ── Style tokens ──────────────────────────────────────────────────────────
+  // ── Shared style tokens ───────────────────────────────────────────────────
   const card = isDark
     ? 'bg-gray-800 border border-gray-700 rounded-xl'
     : 'bg-white border border-gray-200 rounded-xl';
@@ -385,7 +450,6 @@ const StatisticsPage = ({ theme }) => {
 
   const thCls = isDark ? 'bg-gray-700/60 text-gray-400' : 'bg-gray-50 text-gray-500';
 
-  // ── Derived display label ─────────────────────────────────────────────────
   const sbiLabel = sbiData
     ? `${new Date(sbiData.startDate + 'T00:00:00').toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' })} — ${new Date(sbiData.endDate + 'T00:00:00').toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' })}`
     : '';
@@ -402,8 +466,7 @@ const StatisticsPage = ({ theme }) => {
           </h2>
 
           <div className="flex items-center gap-2 flex-wrap">
-
-            {/* Export Bills — small quiet button → dropdown */}
+            {/* Export Bills dropdown */}
             <div className="relative">
               <button
                 onClick={() => setShowExport(v => !v)}
@@ -419,14 +482,14 @@ const StatisticsPage = ({ theme }) => {
                   ${isDark ? 'bg-gray-800 border-gray-700' : 'bg-white border-gray-200'}`}>
                   <div className="flex justify-between items-center mb-3">
                     <p className={`text-xs font-bold flex items-center gap-1.5 ${isDark ? 'text-gray-200' : 'text-gray-700'}`}>
-                      <Calendar size={12} /> Export to Excel
+                      <Calendar size={12} /> Export Invoices to Excel
                     </p>
                     <button onClick={() => setShowExport(false)} className={`${isDark ? 'text-gray-500 hover:text-gray-300' : 'text-gray-400 hover:text-gray-600'}`}>
                       <X size={13} />
                     </button>
                   </div>
                   <p className={`text-[10px] mb-3 leading-relaxed ${isDark ? 'text-gray-500' : 'text-gray-400'}`}>
-                    Two sheets — Invoice Summary and Line Items with customer names. Leave blank for all bills.
+                    Two sheets — Invoice Summary (with Items column) and full Line Items. Leave blank for all bills.
                   </p>
                   <div className="space-y-2 mb-3">
                     <div>
@@ -460,7 +523,7 @@ const StatisticsPage = ({ theme }) => {
           </div>
         </div>
 
-        {/* ══ Unified period selector ══════════════════════════════════════ */}
+        {/* ══ Period selector ══════════════════════════════════════════════ */}
         <div className="flex flex-wrap items-center gap-2">
           <div className={`flex p-1 rounded-lg border ${isDark ? 'bg-gray-800 border-gray-700' : 'bg-white border-gray-200'}`}>
             {[['day','Today'],['week','This Week'],['month','This Month'],['custom','Custom']].map(([id, label]) => (
@@ -489,13 +552,12 @@ const StatisticsPage = ({ theme }) => {
           )}
         </div>
 
-        {/* ══ Summary stat cards ═══════════════════════════════════════════ */}
+        {/* ══ Stat cards ═══════════════════════════════════════════════════ */}
         {statsLoad ? (
           <div className={`${card} p-8 text-center text-sm font-bold opacity-40 animate-pulse`}>Loading…</div>
         ) : stats && (
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
 
-            {/* Revenue */}
             <div className={`${card} p-5 relative overflow-hidden group shadow-sm`}>
               <div className={`absolute -right-4 -top-4 opacity-[0.07] group-hover:scale-110 transition-transform duration-500 ${isDark ? 'text-emerald-400' : 'text-emerald-500'}`}>
                 <IndianRupee size={100} />
@@ -503,13 +565,12 @@ const StatisticsPage = ({ theme }) => {
               <div className="relative z-10">
                 <p className="text-[10px] font-bold uppercase tracking-widest text-gray-400 mb-1">Total Revenue</p>
                 <p className={`text-2xl font-black mb-0.5 ${isDark ? 'text-emerald-400' : 'text-emerald-600'}`}>
-                  ₹{Number(stats.summary?.total_revenue || 0).toLocaleString('en-IN')}
+                  ₹{Math.round(Number(stats.summary?.total_revenue || 0)).toLocaleString('en-IN')}
                 </p>
                 <p className={`text-xs ${isDark ? 'text-gray-500' : 'text-gray-400'}`}>Active bills only</p>
               </div>
             </div>
 
-            {/* Bill count */}
             <div className={`${card} p-5 relative overflow-hidden group shadow-sm`}>
               <div className={`absolute -right-4 -top-4 opacity-[0.07] group-hover:scale-110 transition-transform duration-500 ${isDark ? 'text-blue-400' : 'text-blue-500'}`}>
                 <TrendingUp size={100} />
@@ -523,7 +584,6 @@ const StatisticsPage = ({ theme }) => {
               </div>
             </div>
 
-            {/* External bills */}
             <div className={`${card} p-5 shadow-sm`}>
               <p className="text-[10px] font-bold uppercase tracking-widest text-gray-400 mb-3 flex items-center gap-1.5">
                 <Layers size={12} /> External Bills
@@ -537,7 +597,7 @@ const StatisticsPage = ({ theme }) => {
                     <p className={`text-[10px] ${isDark ? 'text-gray-500' : 'text-gray-400'}`}>{ext.count} entries</p>
                   </div>
                   <p className={`font-black text-sm tabular-nums ${isDark ? 'text-indigo-400' : 'text-indigo-600'}`}>
-                    ₹{Number(ext.total_amount).toLocaleString('en-IN')}
+                    ₹{Math.round(Number(ext.total_amount)).toLocaleString('en-IN')}
                   </p>
                 </div>
               ))}
@@ -545,10 +605,9 @@ const StatisticsPage = ({ theme }) => {
           </div>
         )}
 
-        {/* ══ Sales by Item — the one and only item report ═════════════════ */}
+        {/* ══ Sales by Item ════════════════════════════════════════════════ */}
         <div className={`${card} shadow-sm overflow-hidden`}>
 
-          {/* Card header */}
           <div className={`flex flex-wrap justify-between items-center gap-3 px-5 py-4 border-b ${isDark ? 'border-gray-700' : 'border-gray-200'}`}>
             <div>
               <p className={`text-sm font-bold ${isDark ? 'text-gray-100' : 'text-gray-800'}`}>Sales by Item</p>
@@ -558,22 +617,17 @@ const StatisticsPage = ({ theme }) => {
             </div>
             {sbiData?.rows?.length > 0 && (
               <div className="flex items-center gap-2">
-                <button
-                  onClick={doSbiExcel}
-                  disabled={sbiExport}
+                <button onClick={doSbiExcel} disabled={sbiExport}
                   className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold border transition disabled:opacity-50
                     ${isDark ? 'border-emerald-700 text-emerald-400 bg-emerald-900/20 hover:bg-emerald-900/40' : 'border-emerald-200 text-emerald-700 bg-emerald-50 hover:bg-emerald-100'}`}>
                   <Download size={12} /> Excel
                 </button>
-                <button
-                  onClick={doSbiPdf}
+                <button onClick={doSbiPdf}
                   className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold border transition
                     ${isDark ? 'border-red-800 text-red-400 bg-red-900/20 hover:bg-red-900/40' : 'border-red-200 text-red-600 bg-red-50 hover:bg-red-100'}`}>
                   <FileText size={12} /> PDF
                 </button>
-                <button
-                  onClick={loadAll}
-                  title="Refresh"
+                <button onClick={loadAll} title="Refresh"
                   className={`p-1.5 rounded-lg border transition ${isDark ? 'border-gray-600 text-gray-400 hover:bg-gray-700' : 'border-gray-200 text-gray-500 hover:bg-gray-50'}`}>
                   <RefreshCcw size={12} className={sbiLoad ? 'animate-spin' : ''} />
                 </button>
@@ -581,7 +635,6 @@ const StatisticsPage = ({ theme }) => {
             )}
           </div>
 
-          {/* Card body */}
           <div className="p-5">
             {sbiLoad ? (
               <div className="py-12 text-center text-sm font-bold opacity-40 animate-pulse">Loading…</div>
@@ -599,35 +652,61 @@ const StatisticsPage = ({ theme }) => {
                   <SalesByItemChart rows={sbiData.rows} isDark={isDark} />
                 </div>
 
-                {/* Data table */}
+                {/* Table */}
                 <div className="overflow-x-auto">
                   <table className="w-full text-sm border-collapse">
                     <thead>
                       <tr className={`text-[10px] uppercase font-semibold tracking-wider ${thCls}`}>
                         <th className="px-4 py-2.5 text-left rounded-l-lg">Item Name</th>
                         <th className="px-4 py-2.5 text-right">Qty Sold</th>
-                        <th className="px-4 py-2.5 text-right">Amount</th>
-                        <th className="px-4 py-2.5 text-right rounded-r-lg">Avg Price</th>
+                        <th className="px-4 py-2.5 text-right">
+                          <span className={`block ${isDark ? 'text-gray-300' : 'text-gray-600'}`}>Total</span>
+                          <span className="font-normal opacity-60">Incl. GST</span>
+                        </th>
+                        <th className="px-4 py-2.5 text-right">
+                          <span className={`block ${isDark ? 'text-gray-300' : 'text-gray-600'}`}>Per Unit</span>
+                          <span className="font-normal opacity-60">Excl. GST</span>
+                        </th>
+                        <th className="px-4 py-2.5 text-right">
+                          <span className={`block ${isDark ? 'text-gray-300' : 'text-gray-600'}`}>Per Unit</span>
+                          <span className="font-normal opacity-60">Incl. GST</span>
+                        </th>
+                        <th className="px-4 py-2.5 text-right rounded-r-lg">
+                          <span className={`block ${isDark ? 'text-amber-400' : 'text-amber-600'}`}>Avg Selling</span>
+                          <span className="font-normal opacity-60">Price</span>
+                        </th>
                       </tr>
                     </thead>
                     <tbody>
-                      {sbiData.rows.map((r, i) => (
+                      {sbiData.rows.map((row, i) => (
                         <tr key={i} className={`border-b transition-colors
                           ${isDark ? 'border-gray-700/60 hover:bg-gray-700/30' : 'border-gray-100 hover:bg-blue-50/25'}`}>
-                          <td className={`px-4 py-3 font-medium ${isDark ? 'text-gray-200' : 'text-gray-700'}`}>{r.item_name}</td>
+                          <td className={`px-4 py-3 font-medium ${isDark ? 'text-gray-200' : 'text-gray-700'}`}>
+                            {row.item_name}
+                          </td>
                           <td className={`px-4 py-3 text-right tabular-nums font-semibold ${isDark ? 'text-blue-400' : 'text-blue-600'}`}>
-                            {fmtQty(r.quantity_sold)}
+                            {fmtQty(row.quantity_sold)}
                           </td>
+                          {/* Total incl. GST — whole rupee */}
                           <td className={`px-4 py-3 text-right tabular-nums font-semibold ${isDark ? 'text-emerald-400' : 'text-emerald-700'}`}>
-                            ₹{fmt(r.amount)}
+                            {fmtRs(row.total_incl_gst)}
                           </td>
+                          {/* Per unit excl. GST — keep 2dp (tax calc base) */}
                           <td className={`px-4 py-3 text-right tabular-nums ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>
-                            ₹{fmt(r.average_price)}
+                            ₹{fmt(row.unit_price_excl_gst)}
+                          </td>
+                          {/* Per unit incl. GST — whole rupee */}
+                          <td className={`px-4 py-3 text-right tabular-nums ${isDark ? 'text-gray-300' : 'text-gray-600'}`}>
+                            ₹{r(row.unit_price_incl_gst).toLocaleString('en-IN')}
+                          </td>
+                          {/* Avg selling price incl. GST — whole rupee */}
+                          <td className={`px-4 py-3 text-right tabular-nums font-semibold ${isDark ? 'text-amber-400' : 'text-amber-700'}`}>
+                            ₹{r(row.avg_price_incl_gst).toLocaleString('en-IN')}
                           </td>
                         </tr>
                       ))}
 
-                      {/* Totals row */}
+                      {/* Totals row — whole rupees */}
                       <tr className={`border-t-2 ${isDark ? 'border-gray-500' : 'border-gray-300'}`}>
                         <td className={`px-4 py-3 font-black text-xs uppercase tracking-wide ${isDark ? 'text-gray-100' : 'text-gray-800'}`}>
                           Total
@@ -636,8 +715,10 @@ const StatisticsPage = ({ theme }) => {
                           {fmtQty(sbiData.totals.total_qty)}
                         </td>
                         <td className={`px-4 py-3 text-right tabular-nums font-black text-xs ${isDark ? 'text-emerald-300' : 'text-emerald-700'}`}>
-                          ₹{fmt(sbiData.totals.total_amount)}
+                          {fmtRs(sbiData.totals.total_incl_gst)}
                         </td>
+                        <td className="px-4 py-3" />
+                        <td className="px-4 py-3" />
                         <td className="px-4 py-3" />
                       </tr>
                     </tbody>

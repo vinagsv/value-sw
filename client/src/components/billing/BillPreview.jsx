@@ -208,7 +208,7 @@ const InvoiceContent = ({ currentBill }) => {
 
             <tr>
               <td style={{ textAlign: 'right', padding: '7px 16px 4px 0', fontSize: 14, fontWeight: 800, color: navy, borderTop: `2px solid ${navy}`, textTransform: 'uppercase', letterSpacing: '0.03em' }}>Grand Total</td>
-              <td style={{ textAlign: 'right', padding: '7px 0 4px', fontSize: 15, fontWeight: 800, color: navy, borderTop: `2px solid ${navy}`, fontVariantNumeric: 'tabular-nums' }}>₹{Number(currentBill.grand_total).toFixed(2)}</td>
+              <td style={{ textAlign: 'right', padding: '7px 0 4px', fontSize: 15, fontWeight: 800, color: navy, borderTop: `2px solid ${navy}`, fontVariantNumeric: 'tabular-nums' }}>₹{Math.round(Number(currentBill.grand_total)).toLocaleString('en-IN')}</td>
             </tr>
           </tbody>
         </table>

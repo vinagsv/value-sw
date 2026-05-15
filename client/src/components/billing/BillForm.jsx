@@ -169,6 +169,49 @@ const makeInitialForm = () => ({
   job_card_no: '', vehicle_reg_no: '', narration: '', discount_percent: 0, line_items: [], external_bills: [],
 });
 
+// ─────────────────────────────────────────────────────────────────────────────
+// computeLineItem
+// ─────────────────────────────────────────────────────────────────────────────
+// The key fix: after computing the raw line_total (taxable + tax), round it to
+// the nearest whole rupee, then back-calculate taxable_value and tax amounts
+// FROM that rounded total. This ensures:
+//   - What's stored in the DB = what the customer actually paid (whole rupee)
+//   - Statistics totals = qty × whole-rupee price (no phantom fractions)
+//   - Bill print and DB are always consistent
+//
+// Example: rate=84.50, qty=1, tax=18%
+//   raw total = 84.50 × 1.18 = 99.71 → rounded to 100
+//   back-calc taxable = 100 / 1.18 = 84.746... → stored as 84.75 (2dp)
+//   CGST = SGST = 84.75 × 9% = 7.63 each → total tax = 15.25
+//   line_total stored = 100 (whole rupee) ✓
+// ─────────────────────────────────────────────────────────────────────────────
+const computeLineItem = (qty, customRate, taxRate, isInterstate) => {
+  const q    = Number(qty)        || 0;
+  const rate = Number(customRate) || 0;
+  const tr   = Number(taxRate)    || 0;
+
+  // 1. Raw taxable value and raw total
+  const rawTaxable  = r2(q * rate);
+  const rawTotal    = r2(rawTaxable * (1 + tr / 100));
+
+  // 2. Round line_total to nearest whole rupee
+  const roundedTotal = Math.round(rawTotal);
+
+  // 3. Back-calculate taxable_value from the rounded total so everything adds up
+  const taxable = r2(roundedTotal / (1 + tr / 100));
+
+  // 4. Calculate tax components from the back-calculated taxable
+  const taxes = calculateTaxes(taxable, tr, isInterstate);
+
+  return {
+    taxable_value: taxable,
+    cgst_amt:      taxes.cgst_amt,
+    sgst_amt:      taxes.sgst_amt,
+    igst_amt:      taxes.igst_amt,
+    line_total:    String(roundedTotal), // stored as whole rupee string, matches bill print
+  };
+};
+
 const BillForm = forwardRef(({ currentBill, onSaveSuccess, includeGatePass, setIncludeGatePass, theme, inventoryItems = [] }, ref) => {
   const isDark = theme === 'dark';
 
@@ -230,7 +273,7 @@ const BillForm = forwardRef(({ currentBill, onSaveSuccess, includeGatePass, setI
       subtotal:        sub.toFixed(2),
       total_tax:       tax.toFixed(2),
       discount_amount: discountAmt.toFixed(2),
-      grand_total:     grandRounded.toFixed(2),
+      grand_total:     String(grandRounded),   // whole integer — no .00
     });
   }, [formData.line_items, formData.external_bills, formData.discount_percent]);
 
@@ -270,18 +313,21 @@ const BillForm = forwardRef(({ currentBill, onSaveSuccess, includeGatePass, setI
       return;
     }
 
-    item.item_id = selectedDbItem.id;
-    item.name = selectedDbItem.item_name;
-    item.hsn_code = selectedDbItem.hsn_sac;
-    item.tax_rate = selectedDbItem.inter_state_tax_rate;
+    item.item_id    = selectedDbItem.id;
+    item.name       = selectedDbItem.item_name;
+    item.hsn_code   = selectedDbItem.hsn_sac;
+    item.tax_rate   = selectedDbItem.inter_state_tax_rate;
     item.custom_rate = selectedDbItem.rate;
-    item.qty = 1;
+    item.qty        = 1;
 
-    const taxable = r2(1 * (Number(selectedDbItem.rate) || 0));
-    item.taxable_value = taxable;
-    const taxes = calculateTaxes(taxable, item.tax_rate, formData.is_interstate);
-    item.cgst_amt = taxes.cgst_amt; item.sgst_amt = taxes.sgst_amt; item.igst_amt = taxes.igst_amt;
-    item.line_total = r2(taxable + taxes.total_tax).toFixed(2);
+    // Use computeLineItem so line_total is rounded to whole rupee and
+    // taxable_value is back-calculated from that rounded total.
+    const computed = computeLineItem(1, selectedDbItem.rate, selectedDbItem.inter_state_tax_rate, formData.is_interstate);
+    item.taxable_value = computed.taxable_value;
+    item.cgst_amt      = computed.cgst_amt;
+    item.sgst_amt      = computed.sgst_amt;
+    item.igst_amt      = computed.igst_amt;
+    item.line_total    = computed.line_total;
 
     setLatestRowIndex(null);
     setFormData(prev => ({ ...prev, line_items: newItems }));
@@ -292,17 +338,34 @@ const BillForm = forwardRef(({ currentBill, onSaveSuccess, includeGatePass, setI
     const item = { ...newItems[index], [field]: value };
 
     if (field === 'qty' || field === 'custom_rate') {
-      const taxable = r2((Number(item.qty) || 0) * (Number(item.custom_rate) || 0));
-      item.taxable_value = taxable;
-      const taxes = calculateTaxes(taxable, item.tax_rate, formData.is_interstate);
-      item.cgst_amt = taxes.cgst_amt; item.sgst_amt = taxes.sgst_amt; item.igst_amt = taxes.igst_amt;
-      item.line_total = r2(taxable + taxes.total_tax).toFixed(2);
+      // Recompute with rounding — line_total becomes whole rupee,
+      // taxable_value is back-calculated from that rounded total.
+      const computed = computeLineItem(item.qty, item.custom_rate, item.tax_rate, formData.is_interstate);
+      item.taxable_value = computed.taxable_value;
+      item.cgst_amt      = computed.cgst_amt;
+      item.sgst_amt      = computed.sgst_amt;
+      item.igst_amt      = computed.igst_amt;
+      item.line_total    = computed.line_total;
     } else if (field === 'line_total') {
-      const taxable = calculateFromTotal(Number(value) || 0, item.tax_rate);
+      // User typed directly into the Total column — treat their input as
+      // the authoritative whole-rupee total and back-calculate everything.
+      const roundedTotal = Math.round(Number(value) || 0);
+      const taxable = calculateFromTotal(roundedTotal, item.tax_rate);
       item.taxable_value = taxable;
       const taxes = calculateTaxes(taxable, item.tax_rate, formData.is_interstate);
-      item.cgst_amt = taxes.cgst_amt; item.sgst_amt = taxes.sgst_amt; item.igst_amt = taxes.igst_amt;
+      item.cgst_amt = taxes.cgst_amt;
+      item.sgst_amt = taxes.sgst_amt;
+      item.igst_amt = taxes.igst_amt;
       if (item.qty > 0) item.custom_rate = r2(taxable / item.qty).toFixed(2);
+      item.line_total = String(roundedTotal);
+    } else if (field === 'tax_rate') {
+      // Tax rate changed — recompute keeping existing qty and rate
+      const computed = computeLineItem(item.qty, item.custom_rate, value, formData.is_interstate);
+      item.taxable_value = computed.taxable_value;
+      item.cgst_amt      = computed.cgst_amt;
+      item.sgst_amt      = computed.sgst_amt;
+      item.igst_amt      = computed.igst_amt;
+      item.line_total    = computed.line_total;
     }
 
     newItems[index] = item;
@@ -663,7 +726,7 @@ const BillForm = forwardRef(({ currentBill, onSaveSuccess, includeGatePass, setI
               ))}
               <div className={`mt-3 pt-3 border-t ${divider} flex justify-between items-center`}>
                 <span className={`text-base font-bold uppercase tracking-wide ${isDark ? 'text-gray-100' : 'text-gray-800'}`}>Grand Total</span>
-                <span className={`text-2xl font-black tabular-nums ${isDark ? 'text-blue-400' : 'text-blue-600'}`}>₹{totals.grand_total}</span>
+                <span className={`text-2xl font-black tabular-nums ${isDark ? 'text-blue-400' : 'text-blue-600'}`}>₹{Number(totals.grand_total).toLocaleString('en-IN')}</span>
               </div>
             </div>
           </div>
