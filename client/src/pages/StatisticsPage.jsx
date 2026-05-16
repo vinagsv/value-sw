@@ -18,7 +18,7 @@ import { useAuth } from '../context/AuthContext';
 
 const r    = n => Math.round(Number(n || 0));
 const fmt  = n => Number(n || 0).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-const fmtQty = n => Number(n || 0).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+const fmtQty = n => r(n).toLocaleString('en-IN');
 const fmtRs  = n => '₹' + r(n).toLocaleString('en-IN');
 const fmtWhole = n => '₹' + r(n).toLocaleString('en-IN');
 
