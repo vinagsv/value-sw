@@ -16,26 +16,22 @@ import { useAuth } from '../context/AuthContext';
 // Helpers
 // ─────────────────────────────────────────────────────────────────────────────
 
-const r    = n => Math.round(Number(n || 0)); // round to nearest rupee
+const r    = n => Math.round(Number(n || 0));
 const fmt  = n => Number(n || 0).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 const fmtQty = n => Number(n || 0).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-const fmtRs  = n => '₹' + r(n).toLocaleString('en-IN'); // whole-rupee display
-const fmtWhole = n => '₹' + r(n).toLocaleString('en-IN'); // alias for clarity
+const fmtRs  = n => '₹' + r(n).toLocaleString('en-IN');
+const fmtWhole = n => '₹' + r(n).toLocaleString('en-IN');
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Real PDF download via jsPDF + jsPDF-AutoTable
-// Columns: Item Name | Qty Sold | Total (Incl. GST) | Per Unit (Excl. GST) | Per Unit (Incl. GST) | Avg Selling Price
+// PDF download via jsPDF + jsPDF-AutoTable
 // ─────────────────────────────────────────────────────────────────────────────
 
 const downloadSalesByItemPdf = (reportData, dateLabel, companyName = 'VALUE MOTOR AGENCY PVT LTD') => {
   const { rows, totals } = reportData;
-  const navy = [26, 58, 107]; // #1a3a6b as RGB
+  const navy = [26, 58, 107];
 
-  // Portrait A4: 210mm wide, 14mm margins each side = 182mm usable.
-  // Item Name gets 72mm; the 5 numeric columns share the remaining 110mm (~22mm each).
   const doc = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' });
 
-  // Header
   doc.setFont('helvetica', 'bold');
   doc.setFontSize(14);
   doc.setTextColor(...navy);
@@ -47,16 +43,10 @@ const downloadSalesByItemPdf = (reportData, dateLabel, companyName = 'VALUE MOTO
   doc.text('Sales by Item Report', 14, 20);
   doc.text(dateLabel, doc.internal.pageSize.getWidth() - 14, 20, { align: 'right' });
 
-  // Divider
   doc.setDrawColor(...navy);
   doc.setLineWidth(0.5);
   doc.line(14, 23, doc.internal.pageSize.getWidth() - 14, 23);
 
-  // Table body rows
-  // - Total shown as incl. GST only (whole rupee)
-  // - Per Unit Excl. GST kept at 2dp (tax calculation base)
-  // - Per Unit Incl. GST rounded to whole rupee
-  // - Avg Selling Price rounded to whole rupee
   const tableBody = rows.map(row => [
     row.item_name,
     fmtQty(row.quantity_sold),
@@ -66,7 +56,6 @@ const downloadSalesByItemPdf = (reportData, dateLabel, companyName = 'VALUE MOTO
     r(row.avg_price_incl_gst).toLocaleString('en-IN'),
   ]);
 
-  // Totals row
   tableBody.push([
     'TOTAL',
     fmtQty(totals.total_qty),
@@ -76,16 +65,19 @@ const downloadSalesByItemPdf = (reportData, dateLabel, companyName = 'VALUE MOTO
     '',
   ]);
 
+  // Two-line header definitions: [line1, line2]
+  const headLabels = [
+    ['Item Name', ''],
+    ['Qty', 'Sold'],
+    ['Total  ', '(Incl. GST)'],
+    ['Per Unit', '(Excl. GST)'],
+    ['Per Unit', '(Incl. GST)'],
+    ['Avg Selling', 'Price'],
+  ];
+
   autoTable(doc, {
     startY: 27,
-    head: [[
-      'Item Name',
-      'Qty Sold',
-      'Total (Incl. GST)',
-      'Per Unit (Excl. GST)',
-      'Per Unit (Incl. GST)',
-      'Avg Selling Price',
-    ]],
+    head: [headLabels.map(() => '')],
     body: tableBody,
     styles: {
       font: 'helvetica',
@@ -97,23 +89,53 @@ const downloadSalesByItemPdf = (reportData, dateLabel, companyName = 'VALUE MOTO
       textColor: [255, 255, 255],
       fontStyle: 'bold',
       fontSize: 8,
-      halign: 'right',
+      cellPadding: { top: 4, bottom: 4, left: 3, right: 3 },
+      minCellHeight: 18,
     },
     columnStyles: {
-      0: { halign: 'left',  cellWidth: 72 }, // Item Name — wider to fill portrait page
-      1: { halign: 'right', cellWidth: 18 }, // Qty Sold
-      2: { halign: 'right', cellWidth: 26 }, // Total Incl. GST
-      3: { halign: 'right', cellWidth: 24 }, // Per Unit Excl. GST
-      4: { halign: 'right', cellWidth: 24 }, // Per Unit Incl. GST
-      5: { halign: 'right', cellWidth: 18 }, // Avg Selling Price
+      0: { halign: 'left',   cellWidth: 72 },
+      1: { halign: 'center', cellWidth: 18 },
+      2: { halign: 'center', cellWidth: 26 },
+      3: { halign: 'center', cellWidth: 24 },
+      4: { halign: 'center', cellWidth: 24 },
+      5: { halign: 'center', cellWidth: 18 },
     },
-    // Style the last row (totals) differently
     didParseCell: (data) => {
-      if (data.row.index === tableBody.length - 1) {
+      if (data.section === 'body' && data.row.index === tableBody.length - 1) {
         data.cell.styles.fontStyle = 'bold';
         data.cell.styles.textColor = navy;
         data.cell.styles.lineWidth = { top: 0.5 };
         data.cell.styles.lineColor = navy;
+      }
+    },
+    didDrawCell: (data) => {
+      if (data.section !== 'head') return;
+      const col = data.column.index;
+      const [line1, line2] = headLabels[col];
+      const { x, y, width, height } = data.cell;
+      const isLeft = col === 0;
+
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(8);
+      doc.setTextColor(255, 255, 255);
+
+      if (!line2) {
+        doc.text(line1, isLeft ? x + 3 : x + width / 2, y + height / 2, {
+          baseline: 'middle',
+          align: isLeft ? 'left' : 'center',
+        });
+      } else {
+        const lineH = 4.5;
+        const totalH = lineH * 2;
+        const startY = y + (height - totalH) / 2 + lineH * 0.5;
+        doc.text(line1, isLeft ? x + 3 : x + width / 2, startY, {
+          baseline: 'middle',
+          align: isLeft ? 'left' : 'center',
+        });
+        doc.text(line2, isLeft ? x + 3 : x + width / 2, startY + lineH, {
+          baseline: 'middle',
+          align: isLeft ? 'left' : 'center',
+        });
       }
     },
     alternateRowStyles: { fillColor: [247, 249, 252] },
@@ -326,7 +348,6 @@ const StatisticsPage = ({ theme }) => {
       const bills = await fetchBills(expFrom && expTo ? { fromDate: expFrom, toDate: expTo } : {});
       if (!bills?.length) { alert('No bills found.'); setExporting(false); return; }
 
-      // ── Sheet 1: Invoice Summary ──────────────────────────────────────────
       const summaryRows = bills.map(b => {
         const itemNames = (b.line_items || [])
           .map(i => i.name)
@@ -350,7 +371,6 @@ const StatisticsPage = ({ theme }) => {
         };
       });
 
-      // ── Sheet 2: Line Items ───────────────────────────────────────────────
       const lineRows = [];
       bills.forEach(b => {
         const items = b.line_items || [];
@@ -401,8 +421,6 @@ const StatisticsPage = ({ theme }) => {
   };
 
   // ── Sales by Item — Excel export ──────────────────────────────────────────
-  // Columns: Item Name | Qty Sold | Total Incl. GST | Per Unit Excl. GST | Per Unit Incl. GST | Avg Selling Price
-  // All incl-GST money values are whole rupees. Excl-GST per unit keeps 2dp.
   const doSbiExcel = () => {
     if (!sbiData?.rows?.length) { alert('No data to export.'); return; }
     setSbiExport(true);
@@ -432,7 +450,7 @@ const StatisticsPage = ({ theme }) => {
     setSbiExport(false);
   };
 
-  // ── Sales by Item — real PDF download via jsPDF ───────────────────────────
+  // ── Sales by Item — PDF download ──────────────────────────────────────────
   const doSbiPdf = () => {
     if (!sbiData?.rows?.length) { alert('No data to export.'); return; }
     const label = `From ${new Date(sbiData.startDate + 'T00:00:00').toLocaleDateString('en-IN')} To ${new Date(sbiData.endDate + 'T00:00:00').toLocaleDateString('en-IN')}`;
@@ -652,28 +670,46 @@ const StatisticsPage = ({ theme }) => {
                   <SalesByItemChart rows={sbiData.rows} isDark={isDark} />
                 </div>
 
-                {/* Table */}
+                {/* ── Table with fixed-layout headers ── */}
                 <div className="overflow-x-auto">
-                  <table className="w-full text-sm border-collapse">
+                  <table className="w-full text-sm border-collapse" style={{ tableLayout: 'fixed' }}>
+                    <colgroup>
+                      <col style={{ width: '34%' }} />
+                      <col style={{ width: '10%' }} />
+                      <col style={{ width: '14%' }} />
+                      <col style={{ width: '14%' }} />
+                      <col style={{ width: '14%' }} />
+                      <col style={{ width: '14%' }} />
+                    </colgroup>
                     <thead>
                       <tr className={`text-[10px] uppercase font-semibold tracking-wider ${thCls}`}>
-                        <th className="px-4 py-2.5 text-left rounded-l-lg">Item Name</th>
-                        <th className="px-4 py-2.5 text-right">Qty Sold</th>
-                        <th className="px-4 py-2.5 text-right">
-                          <span className={`block ${isDark ? 'text-gray-300' : 'text-gray-600'}`}>Total</span>
-                          <span className="font-normal opacity-60">Incl. GST</span>
+                        {/* Item Name — left-aligned, sits directly above item list */}
+                        <th className="px-4 py-2.5 text-left rounded-l-lg">
+                          Item Name
                         </th>
+                        {/* Qty Sold */}
                         <th className="px-4 py-2.5 text-right">
-                          <span className={`block ${isDark ? 'text-gray-300' : 'text-gray-600'}`}>Per Unit</span>
-                          <span className="font-normal opacity-60">Excl. GST</span>
+                          Qty Sold
                         </th>
+                        {/* Total Incl. GST */}
                         <th className="px-4 py-2.5 text-right">
-                          <span className={`block ${isDark ? 'text-gray-300' : 'text-gray-600'}`}>Per Unit</span>
-                          <span className="font-normal opacity-60">Incl. GST</span>
+                          <span className="block">Total</span>
+                          <span className={`block normal-case font-normal opacity-60 ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>Incl. GST</span>
                         </th>
+                        {/* Per Unit Excl. GST */}
+                        <th className="px-4 py-2.5 text-right">
+                          <span className="block">Per Unit</span>
+                          <span className={`block normal-case font-normal opacity-60 ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>Excl. GST</span>
+                        </th>
+                        {/* Per Unit Incl. GST */}
+                        <th className="px-4 py-2.5 text-right">
+                          <span className="block">Per Unit</span>
+                          <span className={`block normal-case font-normal opacity-60 ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>Incl. GST</span>
+                        </th>
+                        {/* Avg Selling Price */}
                         <th className="px-4 py-2.5 text-right rounded-r-lg">
                           <span className={`block ${isDark ? 'text-amber-400' : 'text-amber-600'}`}>Avg Selling</span>
-                          <span className="font-normal opacity-60">Price</span>
+                          <span className={`block normal-case font-normal opacity-60 ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>Price</span>
                         </th>
                       </tr>
                     </thead>
@@ -681,32 +717,28 @@ const StatisticsPage = ({ theme }) => {
                       {sbiData.rows.map((row, i) => (
                         <tr key={i} className={`border-b transition-colors
                           ${isDark ? 'border-gray-700/60 hover:bg-gray-700/30' : 'border-gray-100 hover:bg-blue-50/25'}`}>
-                          <td className={`px-4 py-3 font-medium ${isDark ? 'text-gray-200' : 'text-gray-700'}`}>
+                          <td className={`px-4 py-3 font-medium truncate ${isDark ? 'text-gray-200' : 'text-gray-700'}`}>
                             {row.item_name}
                           </td>
                           <td className={`px-4 py-3 text-right tabular-nums font-semibold ${isDark ? 'text-blue-400' : 'text-blue-600'}`}>
                             {fmtQty(row.quantity_sold)}
                           </td>
-                          {/* Total incl. GST — whole rupee */}
                           <td className={`px-4 py-3 text-right tabular-nums font-semibold ${isDark ? 'text-emerald-400' : 'text-emerald-700'}`}>
                             {fmtRs(row.total_incl_gst)}
                           </td>
-                          {/* Per unit excl. GST — keep 2dp (tax calc base) */}
                           <td className={`px-4 py-3 text-right tabular-nums ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>
                             ₹{fmt(row.unit_price_excl_gst)}
                           </td>
-                          {/* Per unit incl. GST — whole rupee */}
                           <td className={`px-4 py-3 text-right tabular-nums ${isDark ? 'text-gray-300' : 'text-gray-600'}`}>
                             ₹{r(row.unit_price_incl_gst).toLocaleString('en-IN')}
                           </td>
-                          {/* Avg selling price incl. GST — whole rupee */}
                           <td className={`px-4 py-3 text-right tabular-nums font-semibold ${isDark ? 'text-amber-400' : 'text-amber-700'}`}>
                             ₹{r(row.avg_price_incl_gst).toLocaleString('en-IN')}
                           </td>
                         </tr>
                       ))}
 
-                      {/* Totals row — whole rupees */}
+                      {/* Totals row */}
                       <tr className={`border-t-2 ${isDark ? 'border-gray-500' : 'border-gray-300'}`}>
                         <td className={`px-4 py-3 font-black text-xs uppercase tracking-wide ${isDark ? 'text-gray-100' : 'text-gray-800'}`}>
                           Total
